@@ -1,0 +1,18 @@
+# ESP-IDF build artifacts
+build/
+sdkconfig
+sdkconfig.esp32c3
+
+# IDE settings
+.vscode/
+.idea/
+.clang_complete
+gcc-flags.json
+
+# Local secrets
+secret.h
+credentials.h
+*.ini.local
+
+.DS_Store
+Thumbs.db
