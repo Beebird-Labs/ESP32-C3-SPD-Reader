@@ -1,4 +1,4 @@
-# ESP32-C3 Speedometer Reader
+# ESP32-C3-SPD-Reader
 
 ## Overview
 
