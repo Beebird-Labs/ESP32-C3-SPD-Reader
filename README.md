@@ -6,12 +6,13 @@ The firmware is intended for a small sender node: one GPIO watches the speed pul
 
 ## Features
 
-- Interrupt-driven pulse timing on GPIO 5.
+- Interrupt-driven pulse timing on GPIO 3.
 - ESP-NOW broadcast or targeted peer delivery.
 - Fixed-point speed calculation and smoothing.
-- Debounce/dead-zone filtering for noisy pulse edges.
+- ESP32-C3 GPIO glitch filtering plus firmware dead-zone filtering for noisy pulse edges.
 - Physics-based rate limiting for impossible acceleration or deceleration spikes.
 - Snap-to-zero behavior when pulses stop.
+- OLED status display with a waiting animation and one-second speed updates.
 - Radio watchdog that reboots if ESP-NOW send confirmations stop for 10 seconds.
 - Serial test mode that generates repeatable speed ramps without a connected sensor.
 - ESP-IDF 5.x and 6.x compatible ESP-NOW send callback handling.
@@ -23,17 +24,20 @@ Required:
 - ESP32-C3 development board.
 - Vehicle speed sensor or compatible pulse source.
 - Signal conditioning between the vehicle signal and ESP32-C3 GPIO.
+- SSD1306-compatible 72 x 40 I2C OLED display at address `0x3C`.
 - ESP-NOW receiver built with an ESP8266 or ESP32.
 
 Default wiring:
 
 | Signal | ESP32-C3 pin | Notes |
 | --- | --- | --- |
-| Speed pulse input | GPIO 5 | Configured as input with internal pull-up and falling-edge interrupt |
+| Speed pulse input | GPIO 3 | Configured as input with internal pull-up and falling-edge interrupt |
+| OLED SDA | GPIO 5 | I2C data |
+| OLED SCL | GPIO 6 | I2C clock |
 | Power | Board dependent | Use a regulated supply suitable for the ESP32-C3 board |
-| Ground | GND | Common ground with the conditioned pulse signal |
+| Ground | GND | Required common ground with the conditioned pulse signal |
 
-Do not connect a vehicle VSS, 12 V signal, inductive sensor, or open-collector line directly to an ESP32-C3 pin. The ESP32-C3 GPIO input must be protected and limited to 3.3 V logic levels.
+Do not connect a vehicle VSS, 12 V signal, inductive sensor, or open-collector line directly to an ESP32-C3 pin. The ESP32-C3 GPIO input must be protected and limited to 3.3 V logic levels, and the pulse source must share a ground reference with the ESP32-C3.
 
 ## Software
 
@@ -83,12 +87,13 @@ The default MAC address is the ESP-NOW broadcast address. Replace it with a rece
 ### Speed Input
 
 ```c
-#define SPEED_PIN GPIO_NUM_5
+#define SPEED_PIN GPIO_NUM_3
 #define SPEED_DEADZONE_US 2000UL
 #define SNAP_TO_ZERO_US 500000UL
+#define MAX_INPUT_SPEED_X10 1220
 ```
 
-`SPEED_DEADZONE_US` rejects edges that arrive too soon after the previous accepted pulse. `SNAP_TO_ZERO_US` clears the pulse state after a long gap so the output can settle back to zero.
+The ESP32-C3 pin glitch filter is enabled before the speed ISR is attached. `SPEED_DEADZONE_US` rejects edges that arrive too soon after the previous accepted pulse. `MAX_INPUT_SPEED_X10` rejects pulse intervals that imply an impossible speed, which helps suppress extra edges from noise or ringing. `SNAP_TO_ZERO_US` clears the pulse state after a long gap so the output can settle back to zero.
 
 ### Sampling And Output
 
@@ -102,10 +107,10 @@ The firmware samples and transmits every 100 ms. Set `OUTPUT_KPH` to `1` to tran
 ### Calibration
 
 ```c
-static const uint32_t K_SPEED_X10 = 8779631UL;
+static const uint32_t K_SPEED_X10 = 8876731UL;
 ```
 
-`K_SPEED_X10` converts measured pulse period into speed in tenths of a unit. The default value is derived from `10,000,000 / 1.139`, where `1.139` is the current VSS calibration factor used by this project.
+`K_SPEED_X10` converts measured pulse period into speed in tenths of a unit. The default value is calibrated from `70 Hz = 100 KPH`, which is `62.1371 MPH`.
 
 If the reading is consistently high or low, recalibrate this value for your pulse source and drivetrain.
 
@@ -152,6 +157,7 @@ Receiver code should treat the packet as little-endian when reading `uint16_t sp
 ## Behavior Notes
 
 - The pulse ISR and time wrapper are placed in IRAM-safe paths for reliable edge handling during flash/cache-sensitive operations.
+- The OLED shows `Waiting` with animated dots at boot, then displays speed once pulses are observed.
 - The periodic sample timer notifies the main task directly, avoiding a spinlock-protected tick counter.
 - If the main task falls behind, queued sample notifications are capped at four per loop to avoid long catch-up bursts.
 - ESP-NOW send failures are logged. If no successful send callback is observed for 10 seconds, the firmware restarts.
@@ -166,12 +172,13 @@ No ESP-NOW packets received:
 
 Speed reads zero:
 
-- Verify the conditioned pulse reaches GPIO 5 as a 3.3 V logic signal.
+- Verify the conditioned pulse reaches GPIO 3 as a 3.3 V logic signal.
 - Confirm the pulse edge matches the falling-edge interrupt setup.
 - Use test mode to separate sensor input issues from radio/receiver issues.
 
 Speed is noisy or jumps:
 
+- Confirm the pulse source and ESP32-C3 share a common ground.
 - Increase hardware filtering or improve signal conditioning first.
 - Tune `SPEED_DEADZONE_US` for contact bounce or electrical noise.
 - Revisit `K_SPEED_X10` if readings are consistently scaled wrong.
@@ -185,13 +192,15 @@ Build cannot find `idf.py`:
 
 ```text
 .
-├── CMakeLists.txt
-├── LICENSE
-├── README.md
-├── main
-│   ├── CMakeLists.txt
-│   └── main.c
-└── sdkconfig.defaults
+|-- CMakeLists.txt
+|-- LICENSE
+|-- README.md
+|-- main
+|   |-- CMakeLists.txt
+|   |-- main.c
+|   |-- oled.cpp
+|   `-- oled.h
+`-- sdkconfig.defaults
 ```
 
 ## License
