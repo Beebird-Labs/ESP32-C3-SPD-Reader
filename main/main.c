@@ -6,15 +6,14 @@
 #include <unistd.h>
 
 #include "oled.h"
+#include "project_config.h"
 
 #include "esp_attr.h"
-#include "esp_check.h"
 #include "esp_err.h"
 #include "esp_event.h"
 #include "esp_idf_version.h"
 #include "esp_intr_alloc.h"
 #include "esp_log.h"
-#include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_now.h"
 #include "esp_system.h"
@@ -31,28 +30,12 @@
 // Configuration
 // ---------------------------------------------------------------------------
 
-#define SPEED_PIN GPIO_NUM_3
-#define WIFI_CHANNEL 1
-
-// Sampling frequency
-#define SAMPLE_INTERVAL_MS 100
-
-// Speed sensor tuning
-#define FILTER_WEIGHT_NUM 4 // 0.40 smoothing weight, expressed as 4 / 10
-#define FILTER_WEIGHT_DEN 10
 // Calibration: 70 Hz = 100 KPH = 62.1371 MPH. Yields speed in 0.1 MPH units
 // when used as: (acc_pulses * K_SPEED_X10) / acc_period_us.
-static const uint32_t K_SPEED_X10 = 8876731UL;
-#define KPH_PER_MPH_PPM 1609344UL
-#define SPEED_DEADZONE_US 2000UL
-#define SNAP_TO_ZERO_US 500000UL
-#define MAX_INPUT_SPEED_X10 1220 // Reject pulse intervals faster than 122.0 MPH
-#define OUTPUT_KPH 0             // Set to 1 to output KPH instead of MPH
-#define ENABLE_SPEED_DIAGNOSTICS 0
+static const uint32_t K_SPEED_X10 = APP_K_SPEED_X10;
+static const uint32_t MIN_VALID_PERIOD_US = APP_K_SPEED_X10 / APP_MAX_INPUT_SPEED_X10;
 
-static const uint32_t MIN_VALID_PERIOD_US = K_SPEED_X10 / MAX_INPUT_SPEED_X10;
-
-static const uint8_t receiver_mac[ESP_NOW_ETH_ALEN] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+static const uint8_t receiver_mac[ESP_NOW_ETH_ALEN] = {APP_RECEIVER_MAC_BYTES};
 
 typedef struct __attribute__((packed))
 {
@@ -70,7 +53,7 @@ static volatile uint32_t s_acc_period_us = 0;
 static volatile uint32_t s_acc_pulses = 0;
 static volatile uint32_t s_last_pulse_us = 0;
 static volatile bool s_seen_pulse = false;
-#if ENABLE_SPEED_DIAGNOSTICS
+#if APP_ENABLE_SPEED_DIAGNOSTICS
 static volatile uint32_t s_diag_raw_edges = 0;
 static volatile uint32_t s_diag_accepted_edges = 0;
 static volatile uint32_t s_diag_deadzone_rejects = 0;
@@ -91,12 +74,11 @@ static gpio_glitch_filter_handle_t s_speed_glitch_filter;
 #endif
 
 static uint32_t s_last_update_us = 0;
-#if ENABLE_SPEED_DIAGNOSTICS
+#if APP_ENABLE_SPEED_DIAGNOSTICS
 static uint32_t s_last_diag_ms = 0;
 #endif
 
 static volatile uint32_t s_last_send_ok_ms = 0;
-static const uint32_t RADIO_WATCHDOG_MS = 10000;
 static bool s_oled_ok = false;
 
 // ---------------------------------------------------------------------------
@@ -174,8 +156,8 @@ static void oled_waiting_task(void *arg)
     int32_t speed_x10 = s_smoothed_speed_x10;
     char speed[24];
 
-#if OUTPUT_KPH
-    speed_x10 = (int32_t)(((uint64_t)speed_x10 * KPH_PER_MPH_PPM + 500000ULL) / 1000000ULL);
+#if APP_OUTPUT_KPH
+    speed_x10 = (int32_t)(((uint64_t)speed_x10 * APP_KPH_PER_MPH_PPM + 500000ULL) / 1000000ULL);
     snprintf(speed, sizeof(speed), "%ld.%ld KPH", (long)(speed_x10 / 10), (long)(speed_x10 % 10));
 #else
     snprintf(speed, sizeof(speed), "%ld.%ld MPH", (long)(speed_x10 / 10), (long)(speed_x10 % 10));
@@ -199,10 +181,10 @@ static void IRAM_ATTR speed_isr(void *arg)
 
   uint32_t now = now_us();
   portENTER_CRITICAL_ISR(&s_pulse_mux);
-#if ENABLE_SPEED_DIAGNOSTICS
+#if APP_ENABLE_SPEED_DIAGNOSTICS
   s_diag_raw_edges++;
 #endif
-  if ((now - s_last_pulse_us) > SPEED_DEADZONE_US)
+  if ((now - s_last_pulse_us) > APP_SPEED_DEADZONE_US)
   {
     uint32_t period_us = now - s_last_pulse_us;
     s_seen_pulse = true;
@@ -211,7 +193,7 @@ static void IRAM_ATTR speed_isr(void *arg)
     {
       if (period_us < MIN_VALID_PERIOD_US)
       {
-#if ENABLE_SPEED_DIAGNOSTICS
+#if APP_ENABLE_SPEED_DIAGNOSTICS
         s_diag_fast_rejects++;
 #endif
         portEXIT_CRITICAL_ISR(&s_pulse_mux);
@@ -220,7 +202,7 @@ static void IRAM_ATTR speed_isr(void *arg)
 
       s_acc_period_us += period_us;
       s_acc_pulses++;
-#if ENABLE_SPEED_DIAGNOSTICS
+#if APP_ENABLE_SPEED_DIAGNOSTICS
       s_diag_period_sum_us += period_us;
       s_diag_period_count++;
       if (period_us < s_diag_min_period_us)
@@ -233,12 +215,12 @@ static void IRAM_ATTR speed_isr(void *arg)
       }
 #endif
     }
-#if ENABLE_SPEED_DIAGNOSTICS
+#if APP_ENABLE_SPEED_DIAGNOSTICS
     s_diag_accepted_edges++;
 #endif
     s_last_pulse_us = now;
   }
-#if ENABLE_SPEED_DIAGNOSTICS
+#if APP_ENABLE_SPEED_DIAGNOSTICS
   else
   {
     s_diag_deadzone_rejects++;
@@ -247,7 +229,7 @@ static void IRAM_ATTR speed_isr(void *arg)
   portEXIT_CRITICAL_ISR(&s_pulse_mux);
 }
 
-#if ENABLE_SPEED_DIAGNOSTICS
+#if APP_ENABLE_SPEED_DIAGNOSTICS
 static void maybe_log_speed_diagnostics(int32_t current_speed_x10)
 {
   uint32_t ms = now_ms();
@@ -302,7 +284,7 @@ static void maybe_log_speed_diagnostics(int32_t current_speed_x10)
 #endif
 
 // ---------------------------------------------------------------------------
-// Test Mode Logic (Dynamically scaled by SAMPLE_INTERVAL_MS)
+// Test Mode Logic (Dynamically scaled by APP_SAMPLE_INTERVAL_MS)
 // ---------------------------------------------------------------------------
 
 typedef struct
@@ -326,12 +308,12 @@ static void test_mode_tick(void)
 {
   s_test_tick++;
 
-  // Calculate total ticks needed based on SAMPLE_INTERVAL_MS
+  // Calculate total ticks needed based on APP_SAMPLE_INTERVAL_MS
   int rem = s_test_tick;
   int cycle;
   for (cycle = 0; cycle < NUM_TEST_CYCLES; cycle++)
   {
-    int cycle_ticks = (TEST_CYCLES[cycle].duration_s * 1000) / SAMPLE_INTERVAL_MS;
+    int cycle_ticks = (TEST_CYCLES[cycle].duration_s * 1000) / APP_SAMPLE_INTERVAL_MS;
     if (rem <= cycle_ticks)
     {
       break;
@@ -346,7 +328,7 @@ static void test_mode_tick(void)
     return;
   }
 
-  int total_cycle_ticks = (TEST_CYCLES[cycle].duration_s * 1000) / SAMPLE_INTERVAL_MS;
+  int total_cycle_ticks = (TEST_CYCLES[cycle].duration_s * 1000) / APP_SAMPLE_INTERVAL_MS;
   int half = total_cycle_ticks / 2;
   int max = TEST_CYCLES[cycle].max_speed;
 
@@ -395,7 +377,7 @@ static void sample_and_send(void)
     uint32_t time_since_last = (last_pulse > 0) ? (now - last_pulse) : 0;
 
     // SAFE TIMEOUT RESET: Must be inside the critical section to prevent ISR race conditions
-    if (time_since_last > SNAP_TO_ZERO_US)
+    if (time_since_last > APP_SNAP_TO_ZERO_US)
     {
       s_last_pulse_us = 0;
       last_pulse = 0;
@@ -459,25 +441,25 @@ static void sample_and_send(void)
   }
 
   // 3. Apply fixed-point exponential smoothing
-  s_smoothed_speed_x10 = ((current_speed_x10 * FILTER_WEIGHT_NUM) +
-                          (s_smoothed_speed_x10 * (FILTER_WEIGHT_DEN - FILTER_WEIGHT_NUM)) +
-                          (FILTER_WEIGHT_DEN / 2)) /
-                         FILTER_WEIGHT_DEN;
+  s_smoothed_speed_x10 = ((current_speed_x10 * APP_FILTER_WEIGHT_NUM) +
+                          (s_smoothed_speed_x10 * (APP_FILTER_WEIGHT_DEN - APP_FILTER_WEIGHT_NUM)) +
+                          (APP_FILTER_WEIGHT_DEN / 2)) /
+                         APP_FILTER_WEIGHT_DEN;
 
   if (current_speed_x10 < 5 && s_smoothed_speed_x10 < 5)
   {
     s_smoothed_speed_x10 = 0;
   }
 
-#if ENABLE_SPEED_DIAGNOSTICS
+#if APP_ENABLE_SPEED_DIAGNOSTICS
   maybe_log_speed_diagnostics(current_speed_x10);
 #endif
 
   // 4. Dispatch
   speed_packet_t pkt;
-#if OUTPUT_KPH
+#if APP_OUTPUT_KPH
   pkt.unit = 'K';
-  pkt.speed = (uint16_t)(((uint64_t)s_smoothed_speed_x10 * KPH_PER_MPH_PPM + 500000ULL) / 1000000ULL);
+  pkt.speed = (uint16_t)(((uint64_t)s_smoothed_speed_x10 * APP_KPH_PER_MPH_PPM + 500000ULL) / 1000000ULL);
 #else
   pkt.unit = 'M';
   pkt.speed = (uint16_t)s_smoothed_speed_x10;
@@ -494,69 +476,128 @@ static void sample_and_send(void)
 // Initialization
 // ---------------------------------------------------------------------------
 
-static void init_nvs(void)
+static void restart_after_error(const char *reason)
+{
+  ESP_LOGE(TAG, "%s; restarting", reason);
+  vTaskDelay(pdMS_TO_TICKS(2000));
+  esp_restart();
+}
+
+static esp_err_t init_nvs(void)
 {
   esp_err_t err = nvs_flash_init();
   if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND)
   {
-    ESP_ERROR_CHECK(nvs_flash_erase());
+    err = nvs_flash_erase();
+    if (err != ESP_OK)
+    {
+      return err;
+    }
     err = nvs_flash_init();
   }
-  ESP_ERROR_CHECK(err);
+  return err;
 }
 
-static void init_wifi(void)
+static esp_err_t init_wifi(void)
 {
-  ESP_ERROR_CHECK(esp_netif_init());
-  ESP_ERROR_CHECK(esp_event_loop_create_default());
+  esp_err_t err = esp_netif_init();
+  if (err != ESP_OK)
+  {
+    return err;
+  }
+  err = esp_event_loop_create_default();
+  if (err != ESP_OK)
+  {
+    return err;
+  }
 
   wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-  ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-  ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
-  ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-  ESP_ERROR_CHECK(esp_wifi_start());
-  ESP_ERROR_CHECK(esp_wifi_set_channel(WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE));
+  err = esp_wifi_init(&cfg);
+  if (err != ESP_OK)
+  {
+    return err;
+  }
+  err = esp_wifi_set_storage(WIFI_STORAGE_RAM);
+  if (err != ESP_OK)
+  {
+    return err;
+  }
+  err = esp_wifi_set_mode(WIFI_MODE_STA);
+  if (err != ESP_OK)
+  {
+    return err;
+  }
+  err = esp_wifi_start();
+  if (err != ESP_OK)
+  {
+    return err;
+  }
+  return esp_wifi_set_channel(APP_WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
 }
 
-static void init_esp_now(void)
+static esp_err_t init_esp_now(void)
 {
-  ESP_ERROR_CHECK(esp_now_init());
-  ESP_ERROR_CHECK(esp_now_register_send_cb(on_send));
+  esp_err_t err = esp_now_init();
+  if (err != ESP_OK)
+  {
+    return err;
+  }
+  err = esp_now_register_send_cb(on_send);
+  if (err != ESP_OK)
+  {
+    return err;
+  }
 
   esp_now_peer_info_t peer_info = {0};
   memcpy(peer_info.peer_addr, receiver_mac, sizeof(receiver_mac));
   peer_info.ifidx = WIFI_IF_STA;
-  peer_info.channel = WIFI_CHANNEL;
+  peer_info.channel = APP_WIFI_CHANNEL;
   peer_info.encrypt = false;
 
-  ESP_ERROR_CHECK(esp_now_add_peer(&peer_info));
+  return esp_now_add_peer(&peer_info);
 }
 
-static void init_speed_gpio(void)
+static esp_err_t init_speed_gpio(void)
 {
   gpio_config_t io_conf = {
-      .pin_bit_mask = 1ULL << SPEED_PIN,
+      .pin_bit_mask = 1ULL << APP_SPEED_PIN,
       .mode = GPIO_MODE_INPUT,
       .pull_up_en = GPIO_PULLUP_ENABLE,
       .pull_down_en = GPIO_PULLDOWN_DISABLE,
       .intr_type = GPIO_INTR_NEGEDGE,
   };
-  ESP_ERROR_CHECK(gpio_config(&io_conf));
+  esp_err_t err = gpio_config(&io_conf);
+  if (err != ESP_OK)
+  {
+    return err;
+  }
 
 #if SOC_GPIO_SUPPORT_PIN_GLITCH_FILTER
   gpio_pin_glitch_filter_config_t filter_config = {
       .clk_src = GLITCH_FILTER_CLK_SRC_DEFAULT,
-      .gpio_num = SPEED_PIN,
+      .gpio_num = APP_SPEED_PIN,
   };
-  ESP_ERROR_CHECK(gpio_new_pin_glitch_filter(&filter_config, &s_speed_glitch_filter));
-  ESP_ERROR_CHECK(gpio_glitch_filter_enable(s_speed_glitch_filter));
+  err = gpio_new_pin_glitch_filter(&filter_config, &s_speed_glitch_filter);
+  if (err != ESP_OK)
+  {
+    return err;
+  }
+  err = gpio_glitch_filter_enable(s_speed_glitch_filter);
+  if (err != ESP_OK)
+  {
+    return err;
+  }
 #endif
 
-  ESP_ERROR_CHECK(gpio_install_isr_service(ESP_INTR_FLAG_IRAM));
-  ESP_ERROR_CHECK(gpio_isr_handler_add(SPEED_PIN, speed_isr, NULL));
+  err = gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
+  if (err != ESP_OK && err != ESP_ERR_INVALID_STATE)
+  {
+    return err;
+  }
+  return gpio_isr_handler_add(APP_SPEED_PIN, speed_isr, NULL);
 }
 
-static void init_sample_timer(void)
+static esp_err_t init_sample_timer(void)
 {
   const esp_timer_create_args_t timer_args = {
       .callback = sample_timer_cb,
@@ -566,8 +607,12 @@ static void init_sample_timer(void)
       .skip_unhandled_events = true,
   };
 
-  ESP_ERROR_CHECK(esp_timer_create(&timer_args, &s_sample_timer));
-  ESP_ERROR_CHECK(esp_timer_start_periodic(s_sample_timer, SAMPLE_INTERVAL_MS * 1000));
+  esp_err_t err = esp_timer_create(&timer_args, &s_sample_timer);
+  if (err != ESP_OK)
+  {
+    return err;
+  }
+  return esp_timer_start_periodic(s_sample_timer, APP_SAMPLE_INTERVAL_MS * 1000);
 }
 
 static void handle_serial_input(void)
@@ -608,15 +653,44 @@ void app_main(void)
     ESP_LOGW(TAG, "OLED task create failed; continuing headless");
   }
 
-  init_nvs();
-  init_wifi();
-  init_esp_now();
-  init_speed_gpio();
-  init_sample_timer();
+  esp_err_t err = init_nvs();
+  if (err != ESP_OK)
+  {
+    ESP_LOGE(TAG, "NVS init failed: %s", esp_err_to_name(err));
+    restart_after_error("NVS init failed");
+  }
+
+  err = init_wifi();
+  if (err != ESP_OK)
+  {
+    ESP_LOGE(TAG, "Wi-Fi init failed: %s", esp_err_to_name(err));
+    restart_after_error("Wi-Fi init failed");
+  }
+
+  err = init_esp_now();
+  if (err != ESP_OK)
+  {
+    ESP_LOGE(TAG, "ESP-NOW init failed: %s", esp_err_to_name(err));
+    restart_after_error("ESP-NOW init failed");
+  }
+
+  err = init_speed_gpio();
+  if (err != ESP_OK)
+  {
+    ESP_LOGE(TAG, "Speed GPIO init failed: %s", esp_err_to_name(err));
+    restart_after_error("Speed GPIO init failed");
+  }
+
+  err = init_sample_timer();
+  if (err != ESP_OK)
+  {
+    ESP_LOGE(TAG, "Sample timer init failed: %s", esp_err_to_name(err));
+    restart_after_error("Sample timer init failed");
+  }
 
   s_last_send_ok_ms = now_ms();
 
-  ESP_LOGI(TAG, "ESP32-C3 VSS System initialized at %d ms intervals.", SAMPLE_INTERVAL_MS);
+  ESP_LOGI(TAG, "ESP32-C3 VSS System initialized at %d ms intervals.", APP_SAMPLE_INTERVAL_MS);
 
   while (true)
   {
@@ -634,7 +708,7 @@ void app_main(void)
 
     handle_serial_input();
 
-    if (now_ms() - s_last_send_ok_ms > RADIO_WATCHDOG_MS)
+    if (now_ms() - s_last_send_ok_ms > APP_RADIO_WATCHDOG_MS)
     {
       ESP_LOGW(TAG, "Watchdog: radio hang detected, rebooting.");
       vTaskDelay(pdMS_TO_TICKS(100));
