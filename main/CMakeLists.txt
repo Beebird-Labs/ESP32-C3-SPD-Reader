@@ -1,4 +1,4 @@
-idf_component_register(SRCS "main.c" "oled.c" "ble_prov.c" "ota_manager.c" "wifi_sta.c"
+idf_component_register(SRCS "main.c" "oled.c" "ble_prov.c" "config_store.c" "ota_manager.c" "wifi_sta.c"
                        INCLUDE_DIRS "."
                        REQUIRES
                          app_update

@@ -1,4 +1,5 @@
 #include "ota_manager.h"
+#include "config_store.h"
 #include "project_config.h"
 #include "wifi_sta.h"
 
@@ -67,7 +68,7 @@ static void ota_task(void *arg)
 
     notify("Downloading firmware");
     esp_http_client_config_t http_cfg = {
-        .url = APP_OTA_FIRMWARE_URL,
+        .url = g_config.ota_url,
         .crt_bundle_attach = esp_crt_bundle_attach,
         .timeout_ms = 60000,
         .keep_alive_enable = true,

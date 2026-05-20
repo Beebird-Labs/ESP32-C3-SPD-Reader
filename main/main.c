@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include "ble_prov.h"
+#include "config_store.h"
 #include "ota_manager.h"
 #include "oled.h"
 #include "project_config.h"
@@ -34,10 +35,7 @@
 
 // Calibration: 70 Hz = 100 KPH = 62.1371 MPH. Yields speed in 0.1 MPH units
 // when used as: (acc_pulses * K_SPEED_X10) / acc_period_us.
-static const uint32_t K_SPEED_X10 = APP_K_SPEED_X10;
-static const uint32_t MIN_VALID_PERIOD_US = APP_K_SPEED_X10 / APP_MAX_INPUT_SPEED_X10;
-
-static const uint8_t receiver_mac[ESP_NOW_ETH_ALEN] = {APP_RECEIVER_MAC_BYTES};
+// Speed constants are now runtime values in g_config (loaded by config_store_init)
 
 typedef struct __attribute__((packed))
 {
@@ -55,7 +53,6 @@ static volatile uint32_t s_acc_period_us = 0;
 static volatile uint32_t s_acc_pulses = 0;
 static volatile uint32_t s_last_pulse_us = 0;
 static volatile bool s_seen_pulse = false;
-#if APP_ENABLE_SPEED_DIAGNOSTICS
 static volatile uint32_t s_diag_raw_edges = 0;
 static volatile uint32_t s_diag_accepted_edges = 0;
 static volatile uint32_t s_diag_deadzone_rejects = 0;
@@ -64,7 +61,6 @@ static volatile uint32_t s_diag_period_count = 0;
 static volatile uint32_t s_diag_period_sum_us = 0;
 static volatile uint32_t s_diag_min_period_us = UINT32_MAX;
 static volatile uint32_t s_diag_max_period_us = 0;
-#endif
 static portMUX_TYPE s_pulse_mux = portMUX_INITIALIZER_UNLOCKED;
 
 static int32_t s_smoothed_speed_x10 = 0;
@@ -76,9 +72,7 @@ static gpio_glitch_filter_handle_t s_speed_glitch_filter;
 #endif
 
 static uint32_t s_last_update_us = 0;
-#if APP_ENABLE_SPEED_DIAGNOSTICS
 static uint32_t s_last_diag_ms = 0;
-#endif
 
 static volatile uint32_t s_last_send_ok_ms = 0;
 static bool s_oled_ok = false;
@@ -183,57 +177,47 @@ static void IRAM_ATTR speed_isr(void *arg)
 
   uint32_t now = now_us();
   portENTER_CRITICAL_ISR(&s_pulse_mux);
-#if APP_ENABLE_SPEED_DIAGNOSTICS
-  s_diag_raw_edges++;
-#endif
-  if ((now - s_last_pulse_us) > APP_SPEED_DEADZONE_US)
+  if (g_config.enable_speed_diagnostics) { s_diag_raw_edges++; }
+  if ((now - s_last_pulse_us) > g_config.speed_deadzone_us)
   {
     uint32_t period_us = now - s_last_pulse_us;
     s_seen_pulse = true;
 
     if (s_last_pulse_us > 0)
     {
-      if (period_us < MIN_VALID_PERIOD_US)
+      if (period_us < g_config.k_speed_x10 / APP_MAX_INPUT_SPEED_X10)
       {
-#if APP_ENABLE_SPEED_DIAGNOSTICS
-        s_diag_fast_rejects++;
-#endif
+        if (g_config.enable_speed_diagnostics) { s_diag_fast_rejects++; }
         portEXIT_CRITICAL_ISR(&s_pulse_mux);
         return;
       }
 
       s_acc_period_us += period_us;
       s_acc_pulses++;
-#if APP_ENABLE_SPEED_DIAGNOSTICS
-      s_diag_period_sum_us += period_us;
-      s_diag_period_count++;
-      if (period_us < s_diag_min_period_us)
+      if (g_config.enable_speed_diagnostics)
       {
-        s_diag_min_period_us = period_us;
+        s_diag_period_sum_us += period_us;
+        s_diag_period_count++;
+        if (period_us < s_diag_min_period_us) { s_diag_min_period_us = period_us; }
+        if (period_us > s_diag_max_period_us) { s_diag_max_period_us = period_us; }
       }
-      if (period_us > s_diag_max_period_us)
-      {
-        s_diag_max_period_us = period_us;
-      }
-#endif
     }
-#if APP_ENABLE_SPEED_DIAGNOSTICS
-    s_diag_accepted_edges++;
-#endif
+    if (g_config.enable_speed_diagnostics) { s_diag_accepted_edges++; }
     s_last_pulse_us = now;
   }
-#if APP_ENABLE_SPEED_DIAGNOSTICS
-  else
+  else if (g_config.enable_speed_diagnostics)
   {
     s_diag_deadzone_rejects++;
   }
-#endif
   portEXIT_CRITICAL_ISR(&s_pulse_mux);
 }
 
-#if APP_ENABLE_SPEED_DIAGNOSTICS
 static void maybe_log_speed_diagnostics(int32_t current_speed_x10)
 {
+  if (!g_config.enable_speed_diagnostics)
+  {
+    return;
+  }
   uint32_t ms = now_ms();
   if ((ms - s_last_diag_ms) < 1000)
   {
@@ -263,7 +247,7 @@ static void maybe_log_speed_diagnostics(int32_t current_speed_x10)
 
   uint32_t avg_period_us = period_count > 0 ? (period_sum_us / period_count) : 0;
   uint32_t hz_x100 = period_sum_us > 0 ? (uint32_t)(((uint64_t)period_count * 100000000ULL) / period_sum_us) : 0;
-  int32_t period_speed_x10 = avg_period_us > 0 ? (int32_t)(K_SPEED_X10 / avg_period_us) : 0;
+  int32_t period_speed_x10 = avg_period_us > 0 ? (int32_t)(g_config.k_speed_x10 / avg_period_us) : 0;
 
   ESP_LOGI(TAG,
            "speed diag: raw=%lu ok=%lu dead=%lu fast=%lu hz=%lu.%02lu avg=%luus min=%luus max=%luus period=%ld.%ldmph current=%ld.%ldmph smooth=%ld.%ldmph",
@@ -283,7 +267,6 @@ static void maybe_log_speed_diagnostics(int32_t current_speed_x10)
            (long)(s_smoothed_speed_x10 / 10),
            (long)(s_smoothed_speed_x10 % 10));
 }
-#endif
 
 // ---------------------------------------------------------------------------
 // Test Mode Logic (Dynamically scaled by APP_SAMPLE_INTERVAL_MS)
@@ -379,7 +362,7 @@ static void sample_and_send(void)
     uint32_t time_since_last = (last_pulse > 0) ? (now - last_pulse) : 0;
 
     // SAFE TIMEOUT RESET: Must be inside the critical section to prevent ISR race conditions
-    if (time_since_last > APP_SNAP_TO_ZERO_US)
+    if (time_since_last > g_config.snap_to_zero_us)
     {
       s_last_pulse_us = 0;
       last_pulse = 0;
@@ -389,7 +372,7 @@ static void sample_and_send(void)
     // 2. Calculate Raw Speed
     if (acc_pulses > 0)
     {
-      current_speed_x10 = (int32_t)((uint64_t)acc_pulses * K_SPEED_X10 / acc_period);
+      current_speed_x10 = (int32_t)((uint64_t)acc_pulses * g_config.k_speed_x10 / acc_period);
 
       // Catch skipped/elongated pulses by enforcing real-world physics caps.
       if (s_last_update_us > 0)
@@ -431,19 +414,17 @@ static void sample_and_send(void)
   }
 
   // 3. Apply fixed-point exponential smoothing
-  s_smoothed_speed_x10 = ((current_speed_x10 * APP_FILTER_WEIGHT_NUM) +
-                          (s_smoothed_speed_x10 * (APP_FILTER_WEIGHT_DEN - APP_FILTER_WEIGHT_NUM)) +
-                          (APP_FILTER_WEIGHT_DEN / 2)) /
-                         APP_FILTER_WEIGHT_DEN;
+  s_smoothed_speed_x10 = ((current_speed_x10 * (int32_t)g_config.filter_weight_num) +
+                          (s_smoothed_speed_x10 * (int32_t)(g_config.filter_weight_den - g_config.filter_weight_num)) +
+                          (int32_t)(g_config.filter_weight_den / 2)) /
+                         (int32_t)g_config.filter_weight_den;
 
   if (current_speed_x10 < 5 && s_smoothed_speed_x10 < 5)
   {
     s_smoothed_speed_x10 = 0;
   }
 
-#if APP_ENABLE_SPEED_DIAGNOSTICS
   maybe_log_speed_diagnostics(current_speed_x10);
-#endif
 
   // 4. Dispatch
   speed_packet_t pkt;
@@ -455,7 +436,7 @@ static void sample_and_send(void)
   pkt.speed = (uint16_t)s_smoothed_speed_x10;
 #endif
 
-  esp_err_t err = esp_now_send(receiver_mac, (uint8_t *)&pkt, sizeof(pkt));
+  esp_err_t err = esp_now_send(g_config.receiver_mac, (uint8_t *)&pkt, sizeof(pkt));
   if (err != ESP_OK)
   {
     ESP_LOGW(TAG, "esp_now_send failed: %s", esp_err_to_name(err));
@@ -539,7 +520,7 @@ static esp_err_t init_esp_now(void)
   }
 
   esp_now_peer_info_t peer_info = {0};
-  memcpy(peer_info.peer_addr, receiver_mac, sizeof(receiver_mac));
+  memcpy(peer_info.peer_addr, g_config.receiver_mac, 6);
   peer_info.ifidx = WIFI_IF_STA;
   peer_info.channel = APP_WIFI_CHANNEL;
   peer_info.encrypt = false;
@@ -650,6 +631,12 @@ void app_main(void)
     restart_after_error("NVS init failed");
   }
 
+  err = config_store_init();
+  if (err != ESP_OK)
+  {
+    ESP_LOGW(TAG, "Config store init: %s (using defaults)", esp_err_to_name(err));
+  }
+
   err = init_wifi();
   if (err != ESP_OK)
   {
@@ -714,7 +701,7 @@ void app_main(void)
 
     handle_serial_input();
 
-    if (!g_ota_in_progress && now_ms() - s_last_send_ok_ms > APP_RADIO_WATCHDOG_MS)
+    if (!g_ota_in_progress && now_ms() - s_last_send_ok_ms > g_config.radio_watchdog_ms)
     {
       ESP_LOGW(TAG, "Watchdog: radio hang detected, rebooting.");
       vTaskDelay(pdMS_TO_TICKS(100));
