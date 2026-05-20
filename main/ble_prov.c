@@ -135,19 +135,18 @@ static int chr_u32_cfg_cb(uint16_t conn, uint16_t attr,
     return BLE_ATT_ERR_UNLIKELY;
 }
 
-static int chr_u8_cfg_cb(uint16_t conn, uint16_t attr,
-                          struct ble_gatt_access_ctxt *ctxt, void *arg)
+// Diagnostics flag: read/write in memory only, never persisted to NVS
+static int chr_diag_en_cb(uint16_t conn, uint16_t attr,
+                           struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
-    uint8_t *field = (uint8_t *)arg;
     if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
-        return os_mbuf_append(ctxt->om, field, sizeof(uint8_t));
+        return os_mbuf_append(ctxt->om, &g_config.enable_speed_diagnostics, 1);
     }
     if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
-        if (OS_MBUF_PKTLEN(ctxt->om) != sizeof(uint8_t)) {
+        if (OS_MBUF_PKTLEN(ctxt->om) != 1) {
             return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
         }
-        os_mbuf_copydata(ctxt->om, 0, sizeof(uint8_t), field);
-        config_store_save();
+        os_mbuf_copydata(ctxt->om, 0, 1, &g_config.enable_speed_diagnostics);
         return 0;
     }
     return BLE_ATT_ERR_UNLIKELY;
@@ -249,8 +248,7 @@ static const struct ble_gatt_svc_def s_gatt_svcs[] = {
             },
             {
                 .uuid      = UUID_CFG_DIAG_EN,
-                .access_cb = chr_u8_cfg_cb,
-                .arg       = &g_config.enable_speed_diagnostics,
+                .access_cb = chr_diag_en_cb,
                 .flags     = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE,
             },
             {
