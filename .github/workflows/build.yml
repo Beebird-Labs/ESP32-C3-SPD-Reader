@@ -23,6 +23,7 @@ jobs:
         run: |
           . "$IDF_PATH/export.sh"
           idf.py build
+          idf.py size
 
       - name: Upload firmware artifacts
         uses: actions/upload-artifact@v4
