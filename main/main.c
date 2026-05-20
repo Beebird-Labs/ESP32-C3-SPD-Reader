@@ -690,6 +690,8 @@ void app_main(void)
 
   ESP_LOGI(TAG, "ESP32-C3 VSS System initialized at %d ms intervals.", APP_SAMPLE_INTERVAL_MS);
 
+  static bool s_ota_active = true;
+
   while (true)
   {
     uint32_t samples_due = ulTaskNotifyTake(pdTRUE, 1);
@@ -702,6 +704,12 @@ void app_main(void)
     {
       sample_and_send();
       samples_due--;
+    }
+
+    if (s_ota_active && s_smoothed_speed_x10 > 0)
+    {
+      s_ota_active = false;
+      ble_prov_disable();
     }
 
     handle_serial_input();

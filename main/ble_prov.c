@@ -32,6 +32,7 @@ static const char *TAG = "ble_prov";
 static uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 static uint16_t s_status_val_handle;
 static uint8_t s_own_addr_type;
+static bool s_enabled = true;
 
 static char s_status_buf[64] = "idle";
 static char s_ssid_buf[33]   = {0};
@@ -137,6 +138,9 @@ static const struct ble_gatt_svc_def s_gatt_svcs[] = {
 
 static void start_advertising(void)
 {
+    if (!s_enabled) {
+        return;
+    }
     // Advertising payload: flags + complete local name
     struct ble_hs_adv_fields adv_fields = {0};
     adv_fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
@@ -255,6 +259,19 @@ void ble_prov_notify_status(const char *msg)
     if (rc != 0) {
         ESP_LOGW(TAG, "notify failed: %d", rc);
     }
+}
+
+void ble_prov_disable(void)
+{
+    if (!s_enabled) {
+        return;
+    }
+    s_enabled = false;
+    ESP_LOGI(TAG, "OTA disabled — vehicle in motion");
+    if (s_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+        ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+    }
+    ble_gap_adv_stop();
 }
 
 esp_err_t ble_prov_init(void)
