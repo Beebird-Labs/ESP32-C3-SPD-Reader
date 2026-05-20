@@ -1,3 +1,7 @@
+# _CAUTION: THIS CODE IS WIP AND IS NOT GUARANTEED TO WORK IN ITS CURRENT STATE_
+
+[![Build](https://github.com/Beebird-Labs/ESP32-C3-SPD-Reader/actions/workflows/build.yml/badge.svg)](https://github.com/Beebird-Labs/ESP32-C3-SPD-Reader/actions/workflows/build.yml)
+
 # ESP32-C3-SPD-Reader
 
 ## Overview
