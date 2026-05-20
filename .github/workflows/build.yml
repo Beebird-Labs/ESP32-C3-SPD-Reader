@@ -10,6 +10,9 @@ on:
     types: [published]
   workflow_dispatch:
 
+permissions:
+  contents: write   # needed to upload release assets
+
 jobs:
   esp-idf:
     name: ESP-IDF
