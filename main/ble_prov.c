@@ -1,4 +1,5 @@
 #include "ble_prov.h"
+#include "config_store.h"
 #include "ota_manager.h"
 #include "project_config.h"
 
@@ -23,11 +24,21 @@ static const char *TAG = "ble_prov";
 // E8F00003 = WiFi password (write, saves credentials to NVS)
 // E8F00004 = OTA trigger (write any byte)
 // E8F00005 = status (read + notify)
-#define UUID_SVC  BLE_UUID128_DECLARE(0x7C,0xA8,0xB9,0x2A,0x1E,0xDE,0xAB,0x82,0x47,0x4F,0x25,0x1B,0x01,0x00,0xF0,0xE8)
-#define UUID_SSID BLE_UUID128_DECLARE(0x7C,0xA8,0xB9,0x2A,0x1E,0xDE,0xAB,0x82,0x47,0x4F,0x25,0x1B,0x02,0x00,0xF0,0xE8)
-#define UUID_PASS BLE_UUID128_DECLARE(0x7C,0xA8,0xB9,0x2A,0x1E,0xDE,0xAB,0x82,0x47,0x4F,0x25,0x1B,0x03,0x00,0xF0,0xE8)
-#define UUID_TRIG BLE_UUID128_DECLARE(0x7C,0xA8,0xB9,0x2A,0x1E,0xDE,0xAB,0x82,0x47,0x4F,0x25,0x1B,0x04,0x00,0xF0,0xE8)
-#define UUID_STAT BLE_UUID128_DECLARE(0x7C,0xA8,0xB9,0x2A,0x1E,0xDE,0xAB,0x82,0x47,0x4F,0x25,0x1B,0x05,0x00,0xF0,0xE8)
+// E8F00006..0E = runtime config params (read/write, little-endian)
+#define UUID_SVC          BLE_UUID128_DECLARE(0x7C,0xA8,0xB9,0x2A,0x1E,0xDE,0xAB,0x82,0x47,0x4F,0x25,0x1B,0x01,0x00,0xF0,0xE8)
+#define UUID_SSID         BLE_UUID128_DECLARE(0x7C,0xA8,0xB9,0x2A,0x1E,0xDE,0xAB,0x82,0x47,0x4F,0x25,0x1B,0x02,0x00,0xF0,0xE8)
+#define UUID_PASS         BLE_UUID128_DECLARE(0x7C,0xA8,0xB9,0x2A,0x1E,0xDE,0xAB,0x82,0x47,0x4F,0x25,0x1B,0x03,0x00,0xF0,0xE8)
+#define UUID_TRIG         BLE_UUID128_DECLARE(0x7C,0xA8,0xB9,0x2A,0x1E,0xDE,0xAB,0x82,0x47,0x4F,0x25,0x1B,0x04,0x00,0xF0,0xE8)
+#define UUID_STAT         BLE_UUID128_DECLARE(0x7C,0xA8,0xB9,0x2A,0x1E,0xDE,0xAB,0x82,0x47,0x4F,0x25,0x1B,0x05,0x00,0xF0,0xE8)
+#define UUID_CFG_FLT_NUM  BLE_UUID128_DECLARE(0x7C,0xA8,0xB9,0x2A,0x1E,0xDE,0xAB,0x82,0x47,0x4F,0x25,0x1B,0x06,0x00,0xF0,0xE8)
+#define UUID_CFG_FLT_DEN  BLE_UUID128_DECLARE(0x7C,0xA8,0xB9,0x2A,0x1E,0xDE,0xAB,0x82,0x47,0x4F,0x25,0x1B,0x07,0x00,0xF0,0xE8)
+#define UUID_CFG_K_SPEED  BLE_UUID128_DECLARE(0x7C,0xA8,0xB9,0x2A,0x1E,0xDE,0xAB,0x82,0x47,0x4F,0x25,0x1B,0x08,0x00,0xF0,0xE8)
+#define UUID_CFG_DEADZONE BLE_UUID128_DECLARE(0x7C,0xA8,0xB9,0x2A,0x1E,0xDE,0xAB,0x82,0x47,0x4F,0x25,0x1B,0x09,0x00,0xF0,0xE8)
+#define UUID_CFG_SNAP     BLE_UUID128_DECLARE(0x7C,0xA8,0xB9,0x2A,0x1E,0xDE,0xAB,0x82,0x47,0x4F,0x25,0x1B,0x0A,0x00,0xF0,0xE8)
+#define UUID_CFG_DIAG_EN  BLE_UUID128_DECLARE(0x7C,0xA8,0xB9,0x2A,0x1E,0xDE,0xAB,0x82,0x47,0x4F,0x25,0x1B,0x0B,0x00,0xF0,0xE8)
+#define UUID_CFG_WATCHDOG BLE_UUID128_DECLARE(0x7C,0xA8,0xB9,0x2A,0x1E,0xDE,0xAB,0x82,0x47,0x4F,0x25,0x1B,0x0C,0x00,0xF0,0xE8)
+#define UUID_CFG_MAC      BLE_UUID128_DECLARE(0x7C,0xA8,0xB9,0x2A,0x1E,0xDE,0xAB,0x82,0x47,0x4F,0x25,0x1B,0x0D,0x00,0xF0,0xE8)
+#define UUID_CFG_OTA_URL  BLE_UUID128_DECLARE(0x7C,0xA8,0xB9,0x2A,0x1E,0xDE,0xAB,0x82,0x47,0x4F,0x25,0x1B,0x0E,0x00,0xF0,0xE8)
 
 static uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 static uint16_t s_status_val_handle;
@@ -100,6 +111,84 @@ static int chr_status_cb(uint16_t conn_handle, uint16_t attr_handle,
     return os_mbuf_append(ctxt->om, s_status_buf, strlen(s_status_buf));
 }
 
+// ---------------------------------------------------------------------------
+// Generic config characteristic callbacks
+// arg is a pointer into g_config for the relevant field.
+// ---------------------------------------------------------------------------
+
+static int chr_u32_cfg_cb(uint16_t conn, uint16_t attr,
+                           struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    uint32_t *field = (uint32_t *)arg;
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+        uint32_t v = *field;
+        return os_mbuf_append(ctxt->om, &v, sizeof(v));
+    }
+    if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
+        if (OS_MBUF_PKTLEN(ctxt->om) != sizeof(uint32_t)) {
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        }
+        os_mbuf_copydata(ctxt->om, 0, sizeof(uint32_t), field);
+        config_store_save();
+        return 0;
+    }
+    return BLE_ATT_ERR_UNLIKELY;
+}
+
+// Diagnostics flag: read/write in memory only, never persisted to NVS
+static int chr_diag_en_cb(uint16_t conn, uint16_t attr,
+                           struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+        return os_mbuf_append(ctxt->om, &g_config.enable_speed_diagnostics, 1);
+    }
+    if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
+        if (OS_MBUF_PKTLEN(ctxt->om) != 1) {
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        }
+        os_mbuf_copydata(ctxt->om, 0, 1, &g_config.enable_speed_diagnostics);
+        return 0;
+    }
+    return BLE_ATT_ERR_UNLIKELY;
+}
+
+static int chr_mac_cfg_cb(uint16_t conn, uint16_t attr,
+                           struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+        return os_mbuf_append(ctxt->om, g_config.receiver_mac, 6);
+    }
+    if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
+        if (OS_MBUF_PKTLEN(ctxt->om) != 6) {
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        }
+        os_mbuf_copydata(ctxt->om, 0, 6, g_config.receiver_mac);
+        config_store_save();
+        ESP_LOGI(TAG, "Receiver MAC updated — reboot to apply");
+        return 0;
+    }
+    return BLE_ATT_ERR_UNLIKELY;
+}
+
+static int chr_url_cfg_cb(uint16_t conn, uint16_t attr,
+                           struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+        return os_mbuf_append(ctxt->om, g_config.ota_url, strlen(g_config.ota_url));
+    }
+    if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
+        uint16_t len = OS_MBUF_PKTLEN(ctxt->om);
+        if (len >= CONFIG_OTA_URL_MAX) {
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        }
+        os_mbuf_copydata(ctxt->om, 0, len, g_config.ota_url);
+        g_config.ota_url[len] = '\0';
+        config_store_save();
+        return 0;
+    }
+    return BLE_ATT_ERR_UNLIKELY;
+}
+
 static const struct ble_gatt_svc_def s_gatt_svcs[] = {
     {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
@@ -125,6 +214,60 @@ static const struct ble_gatt_svc_def s_gatt_svcs[] = {
                 .access_cb  = chr_status_cb,
                 .val_handle = &s_status_val_handle,
                 .flags      = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
+            },
+            // Runtime config — uint32 little-endian, apply immediately + persist to NVS
+            {
+                .uuid      = UUID_CFG_FLT_NUM,
+                .access_cb = chr_u32_cfg_cb,
+                .arg       = &g_config.filter_weight_num,
+                .flags     = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE,
+            },
+            {
+                .uuid      = UUID_CFG_FLT_DEN,
+                .access_cb = chr_u32_cfg_cb,
+                .arg       = &g_config.filter_weight_den,
+                .flags     = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE,
+            },
+            {
+                .uuid      = UUID_CFG_K_SPEED,
+                .access_cb = chr_u32_cfg_cb,
+                .arg       = &g_config.k_speed_x10,
+                .flags     = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE,
+            },
+            {
+                .uuid      = UUID_CFG_DEADZONE,
+                .access_cb = chr_u32_cfg_cb,
+                .arg       = &g_config.speed_deadzone_us,
+                .flags     = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE,
+            },
+            {
+                .uuid      = UUID_CFG_SNAP,
+                .access_cb = chr_u32_cfg_cb,
+                .arg       = &g_config.snap_to_zero_us,
+                .flags     = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE,
+            },
+            {
+                .uuid      = UUID_CFG_DIAG_EN,
+                .access_cb = chr_diag_en_cb,
+                .flags     = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE,
+            },
+            {
+                .uuid      = UUID_CFG_WATCHDOG,
+                .access_cb = chr_u32_cfg_cb,
+                .arg       = &g_config.radio_watchdog_ms,
+                .flags     = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE,
+            },
+            // MAC: 6 bytes — reboot to apply (ESP-NOW peer re-registration happens at boot)
+            {
+                .uuid      = UUID_CFG_MAC,
+                .access_cb = chr_mac_cfg_cb,
+                .flags     = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE,
+            },
+            // OTA URL: UTF-8 string — takes effect on next OTA trigger
+            {
+                .uuid      = UUID_CFG_OTA_URL,
+                .access_cb = chr_url_cfg_cb,
+                .flags     = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE,
             },
             { 0 },
         },
