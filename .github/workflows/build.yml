@@ -45,12 +45,36 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          UPLOAD_URL=$(curl -sf \
+          # Fetch the release and extract the asset upload URL
+          RELEASE=$(curl -s \
             -H "Authorization: Bearer $GITHUB_TOKEN" \
-            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/${{ github.ref_name }}" \
-            | python3 -c "import json,sys; print(json.load(sys.stdin)['upload_url'].split('{')[0])")
-          curl -sf \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/${{ github.ref_name }}")
+          UPLOAD_URL=$(echo "$RELEASE" | python3 -c \
+            "import json,sys; d=json.load(sys.stdin); print(d['upload_url'].split('{')[0])" 2>/dev/null)
+          if [ -z "$UPLOAD_URL" ]; then
+            echo "Could not determine upload URL. API response:"
+            echo "$RELEASE"
+            exit 1
+          fi
+
+          # Delete any existing asset with the same name to allow re-runs
+          ASSET_ID=$(echo "$RELEASE" | python3 -c \
+            "import json,sys; assets=json.load(sys.stdin).get('assets',[]); \
+             match=[a['id'] for a in assets if a['name']=='ESP32-C3-SPD-Reader.bin']; \
+             print(match[0] if match else '')" 2>/dev/null)
+          if [ -n "$ASSET_ID" ]; then
+            echo "Deleting existing asset $ASSET_ID before re-upload"
+            curl -s -X DELETE \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/$ASSET_ID"
+          fi
+
+          # Upload the firmware binary
+          RESPONSE=$(curl -s \
             -H "Authorization: Bearer $GITHUB_TOKEN" \
             -H "Content-Type: application/octet-stream" \
             --data-binary @build/ESP32-C3-SPD-Reader.bin \
-            "${UPLOAD_URL}?name=ESP32-C3-SPD-Reader.bin"
+            "${UPLOAD_URL}?name=ESP32-C3-SPD-Reader.bin")
+          echo "$RESPONSE" | python3 -c \
+            "import json,sys; d=json.load(sys.stdin); \
+             print('Uploaded:', d.get('browser_download_url', d.get('errors', d)))"
