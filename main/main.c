@@ -5,6 +5,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#include "ble_prov.h"
+#include "ota_manager.h"
 #include "oled.h"
 #include "project_config.h"
 
@@ -662,6 +664,12 @@ void app_main(void)
     restart_after_error("ESP-NOW init failed");
   }
 
+  err = ble_prov_init();
+  if (err != ESP_OK)
+  {
+    ESP_LOGW(TAG, "BLE init failed: %s (continuing)", esp_err_to_name(err));
+  }
+
   err = init_speed_gpio();
   if (err != ESP_OK)
   {
@@ -676,9 +684,13 @@ void app_main(void)
     restart_after_error("Sample timer init failed");
   }
 
+  ota_manager_init();
+
   s_last_send_ok_ms = now_ms();
 
   ESP_LOGI(TAG, "ESP32-C3 VSS System initialized at %d ms intervals.", APP_SAMPLE_INTERVAL_MS);
+
+  static bool s_ota_active = true;
 
   while (true)
   {
@@ -694,9 +706,15 @@ void app_main(void)
       samples_due--;
     }
 
+    if (s_ota_active && s_smoothed_speed_x10 > 0)
+    {
+      s_ota_active = false;
+      ble_prov_disable();
+    }
+
     handle_serial_input();
 
-    if (now_ms() - s_last_send_ok_ms > APP_RADIO_WATCHDOG_MS)
+    if (!g_ota_in_progress && now_ms() - s_last_send_ok_ms > APP_RADIO_WATCHDOG_MS)
     {
       ESP_LOGW(TAG, "Watchdog: radio hang detected, rebooting.");
       vTaskDelay(pdMS_TO_TICKS(100));
