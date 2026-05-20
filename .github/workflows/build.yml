@@ -6,6 +6,8 @@ on:
       - main
       - master
   pull_request:
+  release:
+    types: [published]
   workflow_dispatch:
 
 jobs:
@@ -36,3 +38,19 @@ jobs:
             build/bootloader/bootloader.bin
             build/partition_table/partition-table.bin
           if-no-files-found: error
+
+      - name: Attach firmware to release
+        if: github.event_name == 'release'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          UPLOAD_URL=$(curl -sf \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/${{ github.ref_name }}" \
+            | python3 -c "import json,sys; print(json.load(sys.stdin)['upload_url'].split('{')[0])")
+          curl -sf \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary @build/ESP32-C3-SPD-Reader.bin \
+            "${UPLOAD_URL}?name=ESP32-C3-SPD-Reader.bin"
