@@ -136,6 +136,8 @@ static const struct ble_gatt_svc_def s_gatt_svcs[] = {
 // Advertising
 // ---------------------------------------------------------------------------
 
+static int ble_gap_event_handler(struct ble_gap_event *event, void *arg);
+
 static void start_advertising(void)
 {
     if (!s_enabled) {
