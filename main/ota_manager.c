@@ -59,7 +59,7 @@ static void ota_task(void *arg)
     }
 
     notify("Connecting to WiFi");
-    err = wifi_sta_connect(ssid, pass, 30000);
+    err = ota_wifi_connect(ssid, pass, 30000);
     if (err != ESP_OK) {
         notify("WiFi connect failed");
         goto done;
@@ -85,7 +85,7 @@ static void ota_task(void *arg)
 
     ESP_LOGE(TAG, "OTA failed: %s", esp_err_to_name(err));
     notify("OTA failed");
-    wifi_sta_disconnect();
+    ota_wifi_disconnect();
 
 done:
     g_ota_in_progress = false;

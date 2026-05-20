@@ -30,7 +30,7 @@ static void event_handler(void *arg, esp_event_base_t base,
     }
 }
 
-esp_err_t wifi_sta_connect(const char *ssid, const char *password, int timeout_ms)
+esp_err_t ota_wifi_connect(const char *ssid, const char *password, int timeout_ms)
 {
     if (!s_sta_netif) {
         s_sta_netif = esp_netif_create_default_wifi_sta();
@@ -89,7 +89,7 @@ cleanup:
     return err;
 }
 
-void wifi_sta_disconnect(void)
+void ota_wifi_disconnect(void)
 {
     esp_wifi_disconnect();
 }
