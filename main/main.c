@@ -417,24 +417,12 @@ static void sample_and_send(void)
     }
     else
     {
-      // No pulses this window: Decay check with 50% buffer
-      if (s_last_valid_speed_x10 > 5)
-      {
-        uint32_t expected_period_us = K_SPEED_X10 / (uint32_t)s_last_valid_speed_x10;
-
-        if (time_since_last > (expected_period_us + (expected_period_us >> 1)))
-        {
-          current_speed_x10 = (int32_t)(K_SPEED_X10 / time_since_last);
-        }
-        else
-        {
-          current_speed_x10 = s_last_valid_speed_x10;
-        }
-      }
-      else
-      {
-        current_speed_x10 = 0;
-      }
+      // No pulses this window, but not yet timed out. Hold the last known
+      // speed — computing a lower speed from time_since_last causes false
+      // sagging during acceleration when a pulse falls outside the sample
+      // window. The SNAP_TO_ZERO_US timeout above already handles the
+      // genuine stopped case.
+      current_speed_x10 = s_last_valid_speed_x10;
     }
 
     s_last_update_us = now;
