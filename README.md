@@ -6,20 +6,20 @@
 
 ## Overview
 
-ESP-IDF firmware for an ESP32-C3 that reads a vehicle speed sensor pulse signal, calculates speed, smooths the result, and broadcasts it over ESP-NOW.
+ESP-IDF firmware for an ESP32-C3 that reads a vehicle speed sensor pulse signal, calculates speed, smooths the result, and sends it through the current speed-output backend.
 
-The firmware is intended for a small sender node: one GPIO watches the speed pulse input, the ESP32-C3 computes the current speed in 0.1 MPH or KPH units, and another ESP8266 or ESP32 receives the compact ESP-NOW packet.
+The current firmware is intended for a small sender node: one GPIO watches the speed pulse input, the ESP32-C3 computes the current speed in 0.1 MPH or KPH units, and another ESP8266 or ESP32 receives the compact ESP-NOW packet. The output backend is isolated so the delivery path can move to CAN bus without changing speed capture or smoothing code.
 
 ## Features
 
 - Interrupt-driven pulse timing on GPIO 3.
-- ESP-NOW broadcast or targeted peer delivery.
+- Replaceable speed-output backend, currently ESP-NOW broadcast or targeted peer delivery.
 - Fixed-point speed calculation and smoothing.
 - ESP32-C3 GPIO glitch filtering plus firmware dead-zone filtering for noisy pulse edges.
 - Physics-based rate limiting for impossible acceleration or deceleration spikes.
 - Snap-to-zero behavior when pulses stop.
 - OLED status display with a waiting animation and one-second speed updates.
-- Radio watchdog that reboots if ESP-NOW send confirmations stop for 10 seconds.
+- Speed-output watchdog that reboots if send confirmations stop for 10 seconds.
 - Serial test mode that generates repeatable speed ramps without a connected sensor.
 - ESP-IDF 5.x and 6.x compatible ESP-NOW send callback handling.
 
@@ -57,6 +57,15 @@ Tested build environment:
 
 The source includes compatibility handling for the ESP-NOW send callback API change between ESP-IDF 5.x and 6.x.
 
+The application is split into focused modules:
+
+- `main.c` owns speed pulse capture, speed calculation, smoothing, test mode, and top-level orchestration.
+- `speed_output.c` owns the current ESP-NOW speed-output backend, payload packing, peer setup, send callback, and output watchdog timestamp. This is the narrow module boundary intended to make a future CAN bus backend replacement cleaner.
+- `ble_prov.c` owns the BLE provisioning GATT service used to enter Wi-Fi credentials and trigger OTA.
+- `ota_manager.c` owns OTA credential storage, update download, rollback validation, and OTA task lifetime.
+- `wifi_sta.c` owns temporary Wi-Fi station connection for OTA.
+- `oled.c` owns the SSD1306 display driver and display buffer.
+
 ## Build
 
 From the repository root:
@@ -66,6 +75,15 @@ idf.py set-target esp32c3
 idf.py build
 idf.py flash monitor
 ```
+
+The release-facing app binary is generated as:
+
+```text
+build/ESP32-C3-SPD-Reader.bin
+```
+
+The OTA URL in `main/project_config.h` expects the release asset to use that
+same filename.
 
 If `idf.py` is not available in your shell, load your ESP-IDF environment first:
 
@@ -91,14 +109,14 @@ SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.release.defaults" idf.py build
 
 Runtime configuration is centralized in [main/project_config.h](main/project_config.h).
 
-### Radio
+### Speed Output
 
 ```c
 #define APP_WIFI_CHANNEL 1
 #define APP_RECEIVER_MAC_BYTES 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
 ```
 
-The default MAC address is the ESP-NOW broadcast address. Replace it with a receiver MAC address to target one receiver. The sender and receiver must use the same Wi-Fi channel.
+The current backend is ESP-NOW. The default MAC address is the ESP-NOW broadcast address. Replace it with a receiver MAC address to target one receiver. The sender and receiver must use the same Wi-Fi channel.
 
 ### Speed Input
 
@@ -116,9 +134,10 @@ The ESP32-C3 pin glitch filter is enabled before the speed ISR is attached. `APP
 ```c
 #define APP_SAMPLE_INTERVAL_MS 100
 #define APP_OUTPUT_KPH 0
+#define APP_SPEED_OUTPUT_WATCHDOG_MS 10000UL
 ```
 
-The firmware samples and transmits every 100 ms. Set `APP_OUTPUT_KPH` to `1` to transmit KPH instead of MPH.
+The firmware samples and transmits every 100 ms. Set `APP_OUTPUT_KPH` to `1` to transmit KPH instead of MPH. `APP_SPEED_OUTPUT_WATCHDOG_MS` controls how long the current output backend can go without a successful send confirmation before the firmware restarts.
 
 ### Calibration
 
@@ -139,6 +158,20 @@ The final output uses fixed-point exponential smoothing. The default ratio, `4 /
 
 ## Protocol
 
+### BLE Provisioning Service
+
+The BLE device advertises as `SPD-Reader` and exposes a provisioning service for OTA setup:
+
+| UUID | Access | Purpose |
+| --- | --- | --- |
+| `E8F00001-1B25-4F47-82AB-DE1E2AB9A87C` | service | provisioning service |
+| `E8F00002-1B25-4F47-82AB-DE1E2AB9A87C` | write | Wi-Fi SSID |
+| `E8F00003-1B25-4F47-82AB-DE1E2AB9A87C` | write | Wi-Fi password |
+| `E8F00004-1B25-4F47-82AB-DE1E2AB9A87C` | write | trigger OTA update |
+| `E8F00005-1B25-4F47-82AB-DE1E2AB9A87C` | read, notify | OTA status text |
+
+BLE provisioning is disabled once the vehicle is moving so OTA cannot be started while speed output is active.
+
 ### Test Mode
 
 Open the serial monitor and send `t` or `T` to toggle test mode.
@@ -153,7 +186,7 @@ This is useful for validating an ESP-NOW receiver, display, or dashboard integra
 
 ### ESP-NOW Payload
 
-The sender transmits a 3-byte packed payload:
+The current `speed_output.c` backend transmits a 3-byte packed ESP-NOW payload:
 
 ```c
 typedef struct __attribute__((packed))
@@ -168,13 +201,15 @@ typedef struct __attribute__((packed))
 
 Receiver code should treat the packet as little-endian when reading `uint16_t speed` across platforms.
 
+The speed calculation code calls the `speed_output` API instead of calling ESP-NOW directly. The current backend is ESP-NOW, but the API boundary exists so a future CAN bus backend can replace the delivery path without changing pulse capture, smoothing, OLED display, BLE provisioning, or OTA code.
+
 ## Runtime Behavior
 
 - The pulse ISR and time wrapper are placed in IRAM-safe paths for reliable edge handling during flash/cache-sensitive operations.
 - The OLED shows `Waiting` with animated dots at boot, then displays speed once pulses are observed.
 - The periodic sample timer notifies the main task directly, avoiding a spinlock-protected tick counter.
 - If the main task falls behind, queued sample notifications are capped at four per loop to avoid long catch-up bursts.
-- ESP-NOW send failures are logged. If no successful send callback is observed for 10 seconds, the firmware restarts.
+- Speed output send failures are logged. In the current ESP-NOW backend, if no successful send callback is observed for 10 seconds, the firmware restarts.
 - Startup failures are logged and followed by restart instead of aborting immediately.
 
 ## Troubleshooting
@@ -210,11 +245,20 @@ Build cannot find `idf.py`:
 |-- CMakeLists.txt
 |-- LICENSE
 |-- README.md
+|-- partitions.csv
 |-- main
+|   |-- ble_prov.c
+|   |-- ble_prov.h
 |   |-- CMakeLists.txt
 |   |-- main.c
 |   |-- oled.c
 |   |-- oled.h
+|   |-- ota_manager.c
+|   |-- ota_manager.h
+|   |-- speed_output.c
+|   |-- speed_output.h
+|   |-- wifi_sta.c
+|   |-- wifi_sta.h
 |   `-- project_config.h
 |-- sdkconfig.defaults
 |-- sdkconfig.dev.defaults

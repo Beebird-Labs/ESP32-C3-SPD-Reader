@@ -23,19 +23,18 @@
 #define APP_OUTPUT_KPH 0
 #define APP_ENABLE_SPEED_DIAGNOSTICS 0
 
-#define APP_RADIO_WATCHDOG_MS 10000UL
+#define APP_SPEED_OUTPUT_WATCHDOG_MS 10000UL
 
-#define APP_RECEIVER_MAC_BYTES \
-  0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
+#define APP_RECEIVER_MAC_BYTES 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
 
 // OTA update server — must be a GitHub release asset named ESP32-C3-SPD-Reader.bin
-#define APP_OTA_FIRMWARE_URL \
-  "https://github.com/beebird-labs/esp32-c3-spd-reader/releases/latest/download/ESP32-C3-SPD-Reader.bin"
+#define APP_OTA_FIRMWARE_URL                                                                                           \
+    "https://github.com/beebird-labs/esp32-c3-spd-reader/releases/latest/download/ESP32-C3-SPD-Reader.bin"
 
 // BLE device name (shown during scan)
 #define APP_BLE_DEVICE_NAME "SPD-Reader"
 
 // NVS namespace/keys for WiFi credentials used during OTA
 #define APP_OTA_NVS_NAMESPACE "ota_creds"
-#define APP_OTA_NVS_KEY_SSID  "ssid"
-#define APP_OTA_NVS_KEY_PASS  "pass"
+#define APP_OTA_NVS_KEY_SSID "ssid"
+#define APP_OTA_NVS_KEY_PASS "pass"
