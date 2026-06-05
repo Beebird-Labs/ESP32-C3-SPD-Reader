@@ -2,7 +2,7 @@
 
 #include "driver/gpio.h"
 
-#define APP_SPEED_PIN GPIO_NUM_3
+#define APP_SPEED_PIN GPIO_NUM_4
 #define APP_WIFI_CHANNEL 1
 
 #define APP_OLED_SDA GPIO_NUM_5
@@ -28,8 +28,8 @@
 #define APP_RECEIVER_MAC_BYTES 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
 
 // OTA update server — must be a GitHub release asset named ESP32-C3-SPD-Reader.bin
-#define APP_OTA_FIRMWARE_URL                                                                                           \
-    "https://github.com/beebird-labs/esp32-c3-spd-reader/releases/latest/download/ESP32-C3-SPD-Reader.bin"
+#define APP_OTA_FIRMWARE_URL \
+  "https://github.com/beebird-labs/esp32-c3-spd-reader/releases/latest/download/ESP32-C3-SPD-Reader.bin"
 
 // BLE device name (shown during scan)
 #define APP_BLE_DEVICE_NAME "SPD-Reader"
