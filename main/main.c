@@ -32,7 +32,7 @@
 // ---------------------------------------------------------------------------
 
 // Calibration: 70 Hz = 100 KPH = 62.1371 MPH. Yields speed in 0.1 MPH units
-// when used as: (acc_pulses * K_SPEED_X10) / acc_period_us.
+// when used as: (accepted_period_count * K_SPEED_X10) / accepted_period_sum_us.
 static const uint32_t K_SPEED_X10 = APP_K_SPEED_X10;
 static const uint32_t MIN_VALID_PERIOD_US = APP_K_SPEED_X10 / APP_MAX_INPUT_SPEED_X10;
 
@@ -42,9 +42,9 @@ static const uint32_t MIN_VALID_PERIOD_US = APP_K_SPEED_X10 / APP_MAX_INPUT_SPEE
 
 static const char *TAG = "SPEEDOMETER";
 
-static volatile uint32_t s_acc_period_us = 0;
-static volatile uint32_t s_acc_pulses = 0;
-static volatile uint32_t s_last_pulse_us = 0;
+static volatile uint32_t s_accepted_period_sum_us = 0;
+static volatile uint32_t s_accepted_period_count = 0;
+static volatile uint32_t s_last_accepted_pulse_us = 0;
 static volatile bool s_seen_pulse = false;
 #if APP_ENABLE_SPEED_DIAGNOSTICS
 static volatile uint32_t s_diag_raw_edges = 0;
@@ -161,19 +161,19 @@ static void IRAM_ATTR speed_isr(void *arg)
     s_diag_raw_edges++;
     s_diag_total_raw_edges++;
 #endif
-    if (s_last_pulse_us == 0)
+    if (s_last_accepted_pulse_us == 0)
     {
         s_seen_pulse = true;
 #if APP_ENABLE_SPEED_DIAGNOSTICS
         s_diag_accepted_edges++;
         s_diag_total_accepted_edges++;
 #endif
-        s_last_pulse_us = now;
+        s_last_accepted_pulse_us = now;
         portEXIT_CRITICAL_ISR(&s_pulse_mux);
         return;
     }
 
-    uint32_t period_us = now - s_last_pulse_us;
+    uint32_t period_us = now - s_last_accepted_pulse_us;
     if (period_us < MIN_VALID_PERIOD_US)
     {
 #if APP_ENABLE_SPEED_DIAGNOSTICS
@@ -193,8 +193,8 @@ static void IRAM_ATTR speed_isr(void *arg)
     }
 
     s_seen_pulse = true;
-    s_acc_period_us += period_us;
-    s_acc_pulses++;
+    s_accepted_period_sum_us += period_us;
+    s_accepted_period_count++;
 #if APP_ENABLE_SPEED_DIAGNOSTICS
     s_diag_period_sum_us += period_us;
     s_diag_period_count++;
@@ -209,7 +209,7 @@ static void IRAM_ATTR speed_isr(void *arg)
     s_diag_accepted_edges++;
     s_diag_total_accepted_edges++;
 #endif
-    s_last_pulse_us = now;
+    s_last_accepted_pulse_us = now;
     portEXIT_CRITICAL_ISR(&s_pulse_mux);
 }
 
@@ -236,7 +236,7 @@ static void maybe_log_speed_diagnostics(int32_t current_speed_x10)
     uint32_t total_accepted_edges = s_diag_total_accepted_edges;
     uint32_t total_near_edge_rejects = s_diag_total_near_edge_rejects;
     uint32_t total_fast_rejects = s_diag_total_fast_rejects;
-    uint32_t last_pulse_us = s_last_pulse_us;
+    uint32_t last_accepted_pulse_us = s_last_accepted_pulse_us;
     bool seen_pulse = s_seen_pulse;
 
     s_diag_raw_edges = 0;
@@ -252,7 +252,7 @@ static void maybe_log_speed_diagnostics(int32_t current_speed_x10)
     uint32_t avg_period_us = period_count > 0 ? (period_sum_us / period_count) : 0;
     uint32_t hz_x100 = period_sum_us > 0 ? (uint32_t)(((uint64_t)period_count * 100000000ULL) / period_sum_us) : 0;
     int32_t period_speed_x10 = avg_period_us > 0 ? (int32_t)(K_SPEED_X10 / avg_period_us) : 0;
-    uint32_t since_last_ms = last_pulse_us > 0 ? ((now_us() - last_pulse_us) / 1000UL) : 0;
+    uint32_t since_last_ms = last_accepted_pulse_us > 0 ? ((now_us() - last_accepted_pulse_us) / 1000UL) : 0;
     int level = gpio_get_level(APP_SPEED_PIN);
 
     ESP_LOGI(TAG,
@@ -341,9 +341,9 @@ static void sample_and_send(void)
 
         // Keep accumulators clear while in test mode to prevent a flood of stale data when test mode ends
         portENTER_CRITICAL(&s_pulse_mux);
-        s_acc_period_us = 0;
-        s_acc_pulses = 0;
-        s_last_pulse_us = 0;
+        s_accepted_period_sum_us = 0;
+        s_accepted_period_count = 0;
+        s_last_accepted_pulse_us = 0;
         portEXIT_CRITICAL(&s_pulse_mux);
 
         s_last_update_us = now;
@@ -352,30 +352,30 @@ static void sample_and_send(void)
     {
         // 1. Safely grab accumulators
         portENTER_CRITICAL(&s_pulse_mux);
-        uint32_t acc_period = s_acc_period_us;
-        uint32_t acc_pulses = s_acc_pulses;
-        uint32_t last_pulse = s_last_pulse_us;
+        uint32_t accepted_period_sum = s_accepted_period_sum_us;
+        uint32_t accepted_period_count = s_accepted_period_count;
+        uint32_t last_accepted_pulse = s_last_accepted_pulse_us;
 
-        if (acc_pulses > 0)
+        if (accepted_period_count > 0)
         {
-            s_acc_period_us = 0;
-            s_acc_pulses = 0;
+            s_accepted_period_sum_us = 0;
+            s_accepted_period_count = 0;
         }
 
-        uint32_t time_since_last = (last_pulse > 0) ? (now - last_pulse) : 0;
+        uint32_t time_since_last = (last_accepted_pulse > 0) ? (now - last_accepted_pulse) : 0;
 
         // SAFE TIMEOUT RESET: Must be inside the critical section to prevent ISR race conditions
         if (time_since_last > APP_SNAP_TO_ZERO_US)
         {
-            s_last_pulse_us = 0;
-            last_pulse = 0;
+            s_last_accepted_pulse_us = 0;
+            last_accepted_pulse = 0;
         }
         portEXIT_CRITICAL(&s_pulse_mux);
 
         // 2. Calculate Raw Speed
-        if (acc_pulses > 0)
+        if (accepted_period_count > 0)
         {
-            current_speed_x10 = (int32_t)((uint64_t)acc_pulses * K_SPEED_X10 / acc_period);
+            current_speed_x10 = (int32_t)((uint64_t)accepted_period_count * K_SPEED_X10 / accepted_period_sum);
 
             // Catch skipped/elongated pulses by enforcing real-world physics caps.
             if (s_last_update_us > 0)
@@ -400,7 +400,7 @@ static void sample_and_send(void)
             }
             s_last_valid_speed_x10 = current_speed_x10;
         }
-        else if (last_pulse == 0)
+        else if (last_accepted_pulse == 0)
         {
             current_speed_x10 = 0;
             s_last_valid_speed_x10 = 0;
