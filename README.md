@@ -12,7 +12,7 @@ The current firmware is intended for a small sender node: one GPIO watches the s
 
 ## Features
 
-- Interrupt-driven pulse timing on GPIO 3.
+- Interrupt-driven pulse timing on GPIO 4.
 - Replaceable speed-output backend, currently ESP-NOW broadcast or targeted peer delivery.
 - Fixed-point speed calculation and smoothing.
 - ESP32-C3 GPIO glitch filtering plus firmware dead-zone filtering for noisy pulse edges.
@@ -37,7 +37,7 @@ Default wiring:
 
 | Signal | ESP32-C3 pin | Notes |
 | --- | --- | --- |
-| Speed pulse input | GPIO 3 | Input with internal pull-up and falling-edge interrupt |
+| Speed pulse input | GPIO 4 | Input with internal pull-up and falling-edge interrupt |
 | OLED SDA | GPIO 5 | I2C data |
 | OLED SCL | GPIO 6 | I2C clock |
 | Power | Board dependent | Use a regulated supply suitable for the ESP32-C3 board |
@@ -121,7 +121,7 @@ The current backend is ESP-NOW. The default MAC address is the ESP-NOW broadcast
 ### Speed Input
 
 ```c
-#define APP_SPEED_PIN GPIO_NUM_3
+#define APP_SPEED_PIN GPIO_NUM_4
 #define APP_SPEED_DIAG_DEADZONE_US 2000UL
 #define APP_SNAP_TO_ZERO_US 500000UL
 #define APP_MAX_INPUT_SPEED_X10 1220
@@ -222,7 +222,7 @@ No ESP-NOW packets received:
 
 Speed reads zero:
 
-- Verify the conditioned pulse reaches GPIO 3 as a 3.3 V logic signal.
+- Verify the conditioned pulse reaches GPIO 4 as a 3.3 V logic signal.
 - Confirm the pulse edge matches the falling-edge interrupt setup.
 - Use test mode to separate sensor input issues from radio or receiver issues.
 
