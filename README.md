@@ -15,8 +15,8 @@ The current firmware is intended for a small sender node: one GPIO watches the s
 - Interrupt-driven pulse timing on GPIO 4.
 - Replaceable speed-output backend, currently ESP-NOW broadcast or targeted peer delivery.
 - Fixed-point speed calculation and smoothing.
-- ESP32-C3 GPIO glitch filtering plus firmware dead-zone filtering for noisy pulse edges.
-- Physics-based rate limiting for impossible acceleration or deceleration spikes.
+- ESP32-C3 GPIO pin glitch filtering plus ISR-level impossible-period rejection.
+- Accepted-period speed calculation with rejected edges excluded from the timing baseline.
 - Snap-to-zero behavior when pulses stop.
 - OLED status display with a waiting animation and one-second speed updates.
 - Speed-output watchdog that reboots if send confirmations stop for 10 seconds.
@@ -127,7 +127,7 @@ The current backend is ESP-NOW. The default MAC address is the ESP-NOW broadcast
 #define APP_MAX_INPUT_SPEED_X10 1220
 ```
 
-The ESP32-C3 pin glitch filter is enabled before the speed ISR is attached. `APP_MAX_INPUT_SPEED_X10` derives the minimum accepted pulse period; intervals shorter than that imply an impossible speed and are rejected before speed is calculated. `APP_SPEED_DIAG_DEADZONE_US` is only a diagnostics boundary that separates immediate near-edge ringing from other `too_fast` rejects. `APP_SNAP_TO_ZERO_US` clears the pulse state after a long gap so the output can settle back to zero.
+The ESP32-C3 pin glitch filter is enabled before the speed ISR is attached. `APP_MAX_INPUT_SPEED_X10` derives the minimum accepted pulse period; intervals shorter than that imply an impossible speed and are rejected before speed is calculated. Rejected edges do not update the last accepted pulse timestamp, so ringing or too-fast noise cannot move the timing baseline. `APP_SPEED_DIAG_DEADZONE_US` is only a diagnostics boundary that separates immediate near-edge ringing from other `too_fast` rejects. `APP_SNAP_TO_ZERO_US` clears the pulse state after a long gap so the output can settle back to zero.
 
 ### Sampling And Output
 
