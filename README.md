@@ -125,6 +125,8 @@ The current backend is ESP-NOW. The default MAC address is the ESP-NOW broadcast
 #define APP_SPEED_DIAG_DEADZONE_US 2000UL
 #define APP_SNAP_TO_ZERO_US 500000UL
 #define APP_MAX_INPUT_SPEED_X10 1220
+#define APP_ENABLE_SPEED_DIAGNOSTICS 1
+#define APP_SPEED_DIAGNOSTICS_INTERVAL_MS 1000UL
 ```
 
 The ESP32-C3 pin glitch filter is enabled before the speed ISR is attached. `APP_MAX_INPUT_SPEED_X10` derives the minimum accepted pulse period; intervals shorter than that imply an impossible speed and are rejected before speed is calculated. Rejected edges do not update the last accepted pulse timestamp, so ringing or too-fast noise cannot move the timing baseline. `APP_SPEED_DIAG_DEADZONE_US` is only a diagnostics boundary that separates immediate near-edge ringing from other `too_fast` rejects. `APP_SNAP_TO_ZERO_US` clears the pulse state after a long gap so the output can settle back to zero.
