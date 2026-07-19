@@ -49,7 +49,7 @@ static volatile bool s_seen_pulse = false;
 #if APP_ENABLE_SPEED_DIAGNOSTICS
 static volatile uint32_t s_diag_raw_edges = 0;
 static volatile uint32_t s_diag_accepted_edges = 0;
-static volatile uint32_t s_diag_deadzone_rejects = 0;
+static volatile uint32_t s_diag_near_edge_rejects = 0;
 static volatile uint32_t s_diag_fast_rejects = 0;
 static volatile uint32_t s_diag_period_count = 0;
 static volatile uint32_t s_diag_period_sum_us = 0;
@@ -57,7 +57,7 @@ static volatile uint32_t s_diag_min_period_us = UINT32_MAX;
 static volatile uint32_t s_diag_max_period_us = 0;
 static volatile uint32_t s_diag_total_raw_edges = 0;
 static volatile uint32_t s_diag_total_accepted_edges = 0;
-static volatile uint32_t s_diag_total_deadzone_rejects = 0;
+static volatile uint32_t s_diag_total_near_edge_rejects = 0;
 static volatile uint32_t s_diag_total_fast_rejects = 0;
 #endif
 static portMUX_TYPE s_pulse_mux = portMUX_INITIALIZER_UNLOCKED;
@@ -161,51 +161,55 @@ static void IRAM_ATTR speed_isr(void *arg)
     s_diag_raw_edges++;
     s_diag_total_raw_edges++;
 #endif
-    if ((now - s_last_pulse_us) > APP_SPEED_DEADZONE_US)
+    if (s_last_pulse_us == 0)
     {
-        uint32_t period_us = now - s_last_pulse_us;
         s_seen_pulse = true;
-
-        if (s_last_pulse_us > 0)
-        {
-            if (period_us < MIN_VALID_PERIOD_US)
-            {
-#if APP_ENABLE_SPEED_DIAGNOSTICS
-                s_diag_fast_rejects++;
-                s_diag_total_fast_rejects++;
-#endif
-                portEXIT_CRITICAL_ISR(&s_pulse_mux);
-                return;
-            }
-
-            s_acc_period_us += period_us;
-            s_acc_pulses++;
-#if APP_ENABLE_SPEED_DIAGNOSTICS
-            s_diag_period_sum_us += period_us;
-            s_diag_period_count++;
-            if (period_us < s_diag_min_period_us)
-            {
-                s_diag_min_period_us = period_us;
-            }
-            if (period_us > s_diag_max_period_us)
-            {
-                s_diag_max_period_us = period_us;
-            }
-#endif
-        }
 #if APP_ENABLE_SPEED_DIAGNOSTICS
         s_diag_accepted_edges++;
         s_diag_total_accepted_edges++;
 #endif
         s_last_pulse_us = now;
+        portEXIT_CRITICAL_ISR(&s_pulse_mux);
+        return;
     }
-#if APP_ENABLE_SPEED_DIAGNOSTICS
-    else
+
+    uint32_t period_us = now - s_last_pulse_us;
+    if (period_us < MIN_VALID_PERIOD_US)
     {
-        s_diag_deadzone_rejects++;
-        s_diag_total_deadzone_rejects++;
-    }
+#if APP_ENABLE_SPEED_DIAGNOSTICS
+        if (period_us <= APP_SPEED_DIAG_DEADZONE_US)
+        {
+            s_diag_near_edge_rejects++;
+            s_diag_total_near_edge_rejects++;
+        }
+        else
+        {
+            s_diag_fast_rejects++;
+            s_diag_total_fast_rejects++;
+        }
 #endif
+        portEXIT_CRITICAL_ISR(&s_pulse_mux);
+        return;
+    }
+
+    s_seen_pulse = true;
+    s_acc_period_us += period_us;
+    s_acc_pulses++;
+#if APP_ENABLE_SPEED_DIAGNOSTICS
+    s_diag_period_sum_us += period_us;
+    s_diag_period_count++;
+    if (period_us < s_diag_min_period_us)
+    {
+        s_diag_min_period_us = period_us;
+    }
+    if (period_us > s_diag_max_period_us)
+    {
+        s_diag_max_period_us = period_us;
+    }
+    s_diag_accepted_edges++;
+    s_diag_total_accepted_edges++;
+#endif
+    s_last_pulse_us = now;
     portEXIT_CRITICAL_ISR(&s_pulse_mux);
 }
 
@@ -222,7 +226,7 @@ static void maybe_log_speed_diagnostics(int32_t current_speed_x10)
     portENTER_CRITICAL(&s_pulse_mux);
     uint32_t raw_edges = s_diag_raw_edges;
     uint32_t accepted_edges = s_diag_accepted_edges;
-    uint32_t deadzone_rejects = s_diag_deadzone_rejects;
+    uint32_t near_edge_rejects = s_diag_near_edge_rejects;
     uint32_t fast_rejects = s_diag_fast_rejects;
     uint32_t period_count = s_diag_period_count;
     uint32_t period_sum_us = s_diag_period_sum_us;
@@ -230,14 +234,14 @@ static void maybe_log_speed_diagnostics(int32_t current_speed_x10)
     uint32_t max_period_us = s_diag_max_period_us;
     uint32_t total_raw_edges = s_diag_total_raw_edges;
     uint32_t total_accepted_edges = s_diag_total_accepted_edges;
-    uint32_t total_deadzone_rejects = s_diag_total_deadzone_rejects;
+    uint32_t total_near_edge_rejects = s_diag_total_near_edge_rejects;
     uint32_t total_fast_rejects = s_diag_total_fast_rejects;
     uint32_t last_pulse_us = s_last_pulse_us;
     bool seen_pulse = s_seen_pulse;
 
     s_diag_raw_edges = 0;
     s_diag_accepted_edges = 0;
-    s_diag_deadzone_rejects = 0;
+    s_diag_near_edge_rejects = 0;
     s_diag_fast_rejects = 0;
     s_diag_period_count = 0;
     s_diag_period_sum_us = 0;
@@ -252,13 +256,13 @@ static void maybe_log_speed_diagnostics(int32_t current_speed_x10)
     int level = gpio_get_level(APP_SPEED_PIN);
 
     ESP_LOGI(TAG,
-             "speed_diag pin=%d level=%d seen=%d raw=%lu ok=%lu dead=%lu fast=%lu total_raw=%lu total_ok=%lu "
-             "total_dead=%lu total_fast=%lu since_last_ms=%lu hz=%lu.%02lu avg_us=%lu min_us=%lu max_us=%lu "
+             "speed_diag pin=%d level=%d seen=%d raw=%lu ok=%lu near=%lu fast=%lu total_raw=%lu total_ok=%lu "
+             "total_near=%lu total_fast=%lu since_last_ms=%lu hz=%lu.%02lu avg_us=%lu min_us=%lu max_us=%lu "
              "period_mph=%ld.%ld current_mph=%ld.%ld smooth_mph=%ld.%ld",
              (int)APP_SPEED_PIN, level, seen_pulse ? 1 : 0,
-             (unsigned long)raw_edges, (unsigned long)accepted_edges, (unsigned long)deadzone_rejects,
+             (unsigned long)raw_edges, (unsigned long)accepted_edges, (unsigned long)near_edge_rejects,
              (unsigned long)fast_rejects, (unsigned long)total_raw_edges, (unsigned long)total_accepted_edges,
-             (unsigned long)total_deadzone_rejects, (unsigned long)total_fast_rejects, (unsigned long)since_last_ms,
+             (unsigned long)total_near_edge_rejects, (unsigned long)total_fast_rejects, (unsigned long)since_last_ms,
              (unsigned long)(hz_x100 / 100), (unsigned long)(hz_x100 % 100),
              (unsigned long)avg_period_us, (unsigned long)(period_count > 0 ? min_period_us : 0),
              (unsigned long)max_period_us, (long)(period_speed_x10 / 10), (long)(period_speed_x10 % 10),
@@ -646,9 +650,10 @@ void app_main(void)
     ESP_LOGI(TAG, "app_ready sample_interval_ms=%d", APP_SAMPLE_INTERVAL_MS);
 #if APP_ENABLE_SPEED_DIAGNOSTICS
     ESP_LOGI(TAG,
-             "speed_diag_enabled pin=%d edge=falling pullup=1 deadzone_us=%lu snap_to_zero_us=%lu "
+             "speed_diag_enabled pin=%d edge=falling pullup=1 diag_near_edge_us=%lu min_valid_period_us=%lu snap_to_zero_us=%lu "
              "max_input_mph=%d.%d interval_ms=%lu",
-             (int)APP_SPEED_PIN, (unsigned long)APP_SPEED_DEADZONE_US, (unsigned long)APP_SNAP_TO_ZERO_US,
+             (int)APP_SPEED_PIN, (unsigned long)APP_SPEED_DIAG_DEADZONE_US, (unsigned long)MIN_VALID_PERIOD_US,
+             (unsigned long)APP_SNAP_TO_ZERO_US,
              APP_MAX_INPUT_SPEED_X10 / 10, APP_MAX_INPUT_SPEED_X10 % 10,
              (unsigned long)APP_SPEED_DIAGNOSTICS_INTERVAL_MS);
 #endif

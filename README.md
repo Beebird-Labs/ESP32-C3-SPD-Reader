@@ -122,12 +122,12 @@ The current backend is ESP-NOW. The default MAC address is the ESP-NOW broadcast
 
 ```c
 #define APP_SPEED_PIN GPIO_NUM_3
-#define APP_SPEED_DEADZONE_US 2000UL
+#define APP_SPEED_DIAG_DEADZONE_US 2000UL
 #define APP_SNAP_TO_ZERO_US 500000UL
 #define APP_MAX_INPUT_SPEED_X10 1220
 ```
 
-The ESP32-C3 pin glitch filter is enabled before the speed ISR is attached. `APP_SPEED_DEADZONE_US` rejects edges that arrive too soon after the previous accepted pulse. `APP_MAX_INPUT_SPEED_X10` rejects pulse intervals that imply an impossible speed, which helps suppress extra edges from noise or ringing. `APP_SNAP_TO_ZERO_US` clears the pulse state after a long gap so the output can settle back to zero.
+The ESP32-C3 pin glitch filter is enabled before the speed ISR is attached. `APP_MAX_INPUT_SPEED_X10` derives the minimum accepted pulse period; intervals shorter than that imply an impossible speed and are rejected before speed is calculated. `APP_SPEED_DIAG_DEADZONE_US` is only a diagnostics boundary that separates immediate near-edge ringing from other too-fast rejects. `APP_SNAP_TO_ZERO_US` clears the pulse state after a long gap so the output can settle back to zero.
 
 ### Sampling And Output
 
@@ -230,7 +230,7 @@ Speed is noisy or jumps:
 
 - Confirm the pulse source and ESP32-C3 share a common ground.
 - Increase hardware filtering or improve signal conditioning first.
-- Tune `APP_SPEED_DEADZONE_US` for contact bounce or electrical noise.
+- Watch the `near` diagnostics count for contact bounce or electrical noise inside `APP_SPEED_DIAG_DEADZONE_US`.
 - Revisit `APP_K_SPEED_X10` if readings are consistently scaled wrong.
 
 Build cannot find `idf.py`:
