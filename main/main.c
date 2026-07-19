@@ -70,7 +70,6 @@ static TaskHandle_t s_main_task;
 static gpio_glitch_filter_handle_t s_speed_glitch_filter;
 #endif
 
-static uint32_t s_last_update_us = 0;
 #if APP_ENABLE_SPEED_DIAGNOSTICS
 static uint32_t s_last_diag_ms = 0;
 #endif
@@ -345,8 +344,6 @@ static void sample_and_send(void)
         s_accepted_period_count = 0;
         s_last_accepted_pulse_us = 0;
         portEXIT_CRITICAL(&s_pulse_mux);
-
-        s_last_update_us = now;
     }
     else
     {
@@ -376,28 +373,6 @@ static void sample_and_send(void)
         if (accepted_period_count > 0)
         {
             current_speed_x10 = (int32_t)((uint64_t)accepted_period_count * K_SPEED_X10 / accepted_period_sum);
-
-            // Catch skipped/elongated pulses by enforcing real-world physics caps.
-            if (s_last_update_us > 0)
-            {
-                uint32_t dt_us = now - s_last_update_us;
-                if (dt_us > 10000UL)
-                {
-                    int32_t max_drop =
-                        (int32_t)((350ULL * dt_us + 500000ULL) / 1000000ULL); // 35 MPH/s in 0.1 MPH units
-                    int32_t max_jump =
-                        (int32_t)((250ULL * dt_us + 500000ULL) / 1000000ULL); // 25 MPH/s in 0.1 MPH units
-
-                    if (current_speed_x10 < (s_last_valid_speed_x10 - max_drop))
-                    {
-                        current_speed_x10 = s_last_valid_speed_x10 - max_drop;
-                    }
-                    else if (current_speed_x10 > (s_last_valid_speed_x10 + max_jump))
-                    {
-                        current_speed_x10 = s_last_valid_speed_x10 + max_jump;
-                    }
-                }
-            }
             s_last_valid_speed_x10 = current_speed_x10;
         }
         else if (last_accepted_pulse == 0)
@@ -414,8 +389,6 @@ static void sample_and_send(void)
             // genuine stopped case.
             current_speed_x10 = s_last_valid_speed_x10;
         }
-
-        s_last_update_us = now;
     }
 
     // 3. Apply fixed-point exponential smoothing
