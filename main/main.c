@@ -6,9 +6,11 @@
 #include <unistd.h>
 
 #include "ble_prov.h"
-#include "oled.h"
-#include "ota_manager.h"
 #include "project_config.h"
+#if APP_ENABLE_OLED
+#include "oled.h"
+#endif
+#include "ota_manager.h"
 #include "speed_output.h"
 
 #include "driver/gpio.h"
@@ -46,12 +48,17 @@ static volatile uint32_t s_accepted_period_sum_us = 0;
 static volatile uint32_t s_accepted_period_count = 0;
 static volatile uint32_t s_accepted_window_start_us = 0;
 static volatile uint32_t s_last_accepted_pulse_us = 0;
+static volatile uint32_t s_period_baseline_us = 0;
+static volatile uint32_t s_period_baseline_count = 0;
+static volatile uint32_t s_consistency_long_reject_count = 0;
 static volatile bool s_seen_pulse = false;
 #if APP_ENABLE_SPEED_DIAGNOSTICS
 static volatile uint32_t s_diag_raw_edges = 0;
 static volatile uint32_t s_diag_accepted_edges = 0;
 static volatile uint32_t s_diag_near_edge_rejects = 0;
 static volatile uint32_t s_diag_too_fast_rejects = 0;
+static volatile uint32_t s_diag_short_period_rejects = 0;
+static volatile uint32_t s_diag_long_period_rejects = 0;
 static volatile uint32_t s_diag_period_count = 0;
 static volatile uint32_t s_diag_period_sum_us = 0;
 static volatile uint32_t s_diag_min_period_us = UINT32_MAX;
@@ -60,11 +67,14 @@ static volatile uint32_t s_diag_total_raw_edges = 0;
 static volatile uint32_t s_diag_total_accepted_edges = 0;
 static volatile uint32_t s_diag_total_near_edge_rejects = 0;
 static volatile uint32_t s_diag_total_too_fast_rejects = 0;
+static volatile uint32_t s_diag_total_short_period_rejects = 0;
+static volatile uint32_t s_diag_total_long_period_rejects = 0;
 #endif
 static portMUX_TYPE s_pulse_mux = portMUX_INITIALIZER_UNLOCKED;
 
 static int32_t s_smoothed_speed_x10 = 0;
 static int32_t s_last_valid_speed_x10 = 0;
+static uint32_t s_last_send_us = 0;
 static esp_timer_handle_t s_sample_timer;
 static TaskHandle_t s_main_task;
 #if SOC_GPIO_SUPPORT_PIN_GLITCH_FILTER
@@ -74,8 +84,6 @@ static gpio_glitch_filter_handle_t s_speed_glitch_filter;
 #if APP_ENABLE_SPEED_DIAGNOSTICS
 static uint32_t s_last_diag_ms = 0;
 #endif
-
-static bool s_oled_ok = false;
 
 // ---------------------------------------------------------------------------
 // Time Helpers
@@ -104,6 +112,7 @@ static void sample_timer_cb(void *arg)
     }
 }
 
+#if APP_ENABLE_OLED
 static void oled_speed_task(void *arg)
 {
     (void)arg;
@@ -129,10 +138,40 @@ static void oled_speed_task(void *arg)
         vTaskDelay(pdMS_TO_TICKS(200));
     }
 }
+#endif
 
 // ---------------------------------------------------------------------------
 // ISR
 // ---------------------------------------------------------------------------
+
+static void IRAM_ATTR reset_period_consistency(void)
+{
+    s_period_baseline_us = 0;
+    s_period_baseline_count = 0;
+    s_consistency_long_reject_count = 0;
+}
+
+static void IRAM_ATTR update_period_baseline(uint32_t period_us)
+{
+    if (s_period_baseline_count == 0)
+    {
+        s_period_baseline_us = period_us;
+        s_period_baseline_count = 1;
+    }
+    else if (s_period_baseline_count < APP_PERIOD_CONSISTENCY_MIN_COUNT)
+    {
+        uint32_t count = s_period_baseline_count + 1;
+        s_period_baseline_us =
+            (uint32_t)(((uint64_t)s_period_baseline_us * s_period_baseline_count + period_us) / count);
+        s_period_baseline_count = count;
+    }
+    else
+    {
+        s_period_baseline_us = (uint32_t)(((uint64_t)s_period_baseline_us * 3 + period_us + 2) / 4);
+    }
+
+    s_consistency_long_reject_count = 0;
+}
 
 static void IRAM_ATTR speed_isr(void *arg)
 {
@@ -175,6 +214,43 @@ static void IRAM_ATTR speed_isr(void *arg)
         return;
     }
 
+    if (s_period_baseline_count >= APP_PERIOD_CONSISTENCY_MIN_COUNT)
+    {
+        uint32_t min_consistent_period =
+            (uint32_t)(((uint64_t)s_period_baseline_us * (100 - APP_PERIOD_CONSISTENCY_PERCENT)) / 100);
+        uint32_t max_consistent_period =
+            (uint32_t)(((uint64_t)s_period_baseline_us * (100 + APP_PERIOD_CONSISTENCY_PERCENT)) / 100);
+
+        if (period_us < min_consistent_period)
+        {
+#if APP_ENABLE_SPEED_DIAGNOSTICS
+            s_diag_short_period_rejects++;
+            s_diag_total_short_period_rejects++;
+#endif
+            portEXIT_CRITICAL_ISR(&s_pulse_mux);
+            return;
+        }
+
+        if (period_us > max_consistent_period)
+        {
+#if APP_ENABLE_SPEED_DIAGNOSTICS
+            s_diag_long_period_rejects++;
+            s_diag_total_long_period_rejects++;
+#endif
+            s_seen_pulse = true;
+            s_last_accepted_pulse_us = now;
+            s_consistency_long_reject_count++;
+
+            if (s_consistency_long_reject_count < APP_PERIOD_CONSISTENCY_REACQUIRE_COUNT)
+            {
+                portEXIT_CRITICAL_ISR(&s_pulse_mux);
+                return;
+            }
+
+            reset_period_consistency();
+        }
+    }
+
     s_seen_pulse = true;
     if (s_accepted_period_count == 0)
     {
@@ -182,6 +258,7 @@ static void IRAM_ATTR speed_isr(void *arg)
     }
     s_accepted_period_sum_us += period_us;
     s_accepted_period_count++;
+    update_period_baseline(period_us);
 #if APP_ENABLE_SPEED_DIAGNOSTICS
     s_diag_period_sum_us += period_us;
     s_diag_period_count++;
@@ -215,6 +292,8 @@ static void maybe_log_speed_diagnostics(int32_t current_speed_x10)
     uint32_t accepted_edges = s_diag_accepted_edges;
     uint32_t near_edge_rejects = s_diag_near_edge_rejects;
     uint32_t too_fast_rejects = s_diag_too_fast_rejects;
+    uint32_t short_period_rejects = s_diag_short_period_rejects;
+    uint32_t long_period_rejects = s_diag_long_period_rejects;
     uint32_t period_count = s_diag_period_count;
     uint32_t period_sum_us = s_diag_period_sum_us;
     uint32_t min_period_us = s_diag_min_period_us;
@@ -223,13 +302,18 @@ static void maybe_log_speed_diagnostics(int32_t current_speed_x10)
     uint32_t total_accepted_edges = s_diag_total_accepted_edges;
     uint32_t total_near_edge_rejects = s_diag_total_near_edge_rejects;
     uint32_t total_too_fast_rejects = s_diag_total_too_fast_rejects;
+    uint32_t total_short_period_rejects = s_diag_total_short_period_rejects;
+    uint32_t total_long_period_rejects = s_diag_total_long_period_rejects;
     uint32_t last_accepted_pulse_us = s_last_accepted_pulse_us;
+    uint32_t period_baseline_us = s_period_baseline_us;
     bool seen_pulse = s_seen_pulse;
 
     s_diag_raw_edges = 0;
     s_diag_accepted_edges = 0;
     s_diag_near_edge_rejects = 0;
     s_diag_too_fast_rejects = 0;
+    s_diag_short_period_rejects = 0;
+    s_diag_long_period_rejects = 0;
     s_diag_period_count = 0;
     s_diag_period_sum_us = 0;
     s_diag_min_period_us = UINT32_MAX;
@@ -243,17 +327,21 @@ static void maybe_log_speed_diagnostics(int32_t current_speed_x10)
     int level = gpio_get_level(APP_SPEED_PIN);
 
     ESP_LOGI(TAG,
-             "speed_diag pin=%d level=%d seen=%d raw=%lu ok=%lu near=%lu too_fast=%lu total_raw=%lu total_ok=%lu "
-             "total_near=%lu total_too_fast=%lu since_last_ms=%lu hz=%lu.%02lu avg_us=%lu min_us=%lu max_us=%lu "
+             "speed_diag pin=%d level=%d seen=%d raw=%lu ok=%lu near=%lu too_fast=%lu short=%lu long=%lu "
+             "total_raw=%lu total_ok=%lu total_near=%lu total_too_fast=%lu total_short=%lu total_long=%lu "
+             "since_last_ms=%lu hz=%lu.%02lu avg_us=%lu min_us=%lu max_us=%lu baseline_us=%lu "
              "period_mph=%ld.%ld current_mph=%ld.%ld smooth_mph=%ld.%ld",
              (int)APP_SPEED_PIN, level, seen_pulse ? 1 : 0,
              (unsigned long)raw_edges, (unsigned long)accepted_edges, (unsigned long)near_edge_rejects,
-             (unsigned long)too_fast_rejects, (unsigned long)total_raw_edges, (unsigned long)total_accepted_edges,
+             (unsigned long)too_fast_rejects, (unsigned long)short_period_rejects, (unsigned long)long_period_rejects,
+             (unsigned long)total_raw_edges, (unsigned long)total_accepted_edges,
              (unsigned long)total_near_edge_rejects, (unsigned long)total_too_fast_rejects,
+             (unsigned long)total_short_period_rejects, (unsigned long)total_long_period_rejects,
              (unsigned long)since_last_ms,
              (unsigned long)(hz_x100 / 100), (unsigned long)(hz_x100 % 100),
              (unsigned long)avg_period_us, (unsigned long)(period_count > 0 ? min_period_us : 0),
-             (unsigned long)max_period_us, (long)(period_speed_x10 / 10), (long)(period_speed_x10 % 10),
+             (unsigned long)max_period_us, (unsigned long)period_baseline_us,
+             (long)(period_speed_x10 / 10), (long)(period_speed_x10 % 10),
              (long)(current_speed_x10 / 10), (long)(current_speed_x10 % 10), (long)(s_smoothed_speed_x10 / 10),
              (long)(s_smoothed_speed_x10 % 10));
 }
@@ -333,6 +421,7 @@ static void sample_and_send(void)
         s_accepted_period_count = 0;
         s_accepted_window_start_us = 0;
         s_last_accepted_pulse_us = 0;
+        reset_period_consistency();
         portEXIT_CRITICAL(&s_pulse_mux);
     }
     else
@@ -358,6 +447,7 @@ static void sample_and_send(void)
             s_accepted_period_count = 0;
             s_accepted_window_start_us = 0;
             s_last_accepted_pulse_us = 0;
+            reset_period_consistency();
             accepted_period_count = 0;
             last_accepted_pulse = 0;
         }
@@ -405,6 +495,13 @@ static void sample_and_send(void)
 #if APP_ENABLE_SPEED_DIAGNOSTICS
     maybe_log_speed_diagnostics(current_speed_x10);
 #endif
+
+    uint32_t time_since_send = (s_last_send_us > 0) ? (now - s_last_send_us) : APP_SEND_INTERVAL_MS * 1000UL;
+    if (time_since_send < APP_SEND_INTERVAL_MS * 1000UL)
+    {
+        return;
+    }
+    s_last_send_us = now;
 
     // 4. Dispatch
 #if APP_OUTPUT_KPH
@@ -486,7 +583,7 @@ static esp_err_t init_speed_gpio(void)
     gpio_config_t io_conf = {
         .pin_bit_mask = 1ULL << APP_SPEED_PIN,
         .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_NEGEDGE,
     };
@@ -567,8 +664,9 @@ void app_main(void)
     setvbuf(stdin, NULL, _IONBF, 0);
     fcntl(STDIN_FILENO, F_SETFL, O_NONBLOCK);
 
-    s_oled_ok = oled_init();
-    if (!s_oled_ok)
+#if APP_ENABLE_OLED
+    bool oled_ok = oled_init();
+    if (!oled_ok)
     {
         ESP_LOGW(TAG, "oled_unavailable continuing=headless");
     }
@@ -576,6 +674,9 @@ void app_main(void)
     {
         ESP_LOGW(TAG, "task_create_failed task=oled_speed continuing=headless");
     }
+#else
+    ESP_LOGI(TAG, "oled_disabled");
+#endif
 
     esp_err_t err = init_nvs();
     if (err != ESP_OK)
@@ -620,10 +721,10 @@ void app_main(void)
 
     ota_manager_init();
 
-    ESP_LOGI(TAG, "app_ready sample_interval_ms=%d", APP_SAMPLE_INTERVAL_MS);
+    ESP_LOGI(TAG, "app_ready sample_interval_ms=%d send_interval_ms=%d", APP_SAMPLE_INTERVAL_MS, APP_SEND_INTERVAL_MS);
 #if APP_ENABLE_SPEED_DIAGNOSTICS
     ESP_LOGI(TAG,
-             "speed_diag_enabled pin=%d edge=falling pullup=1 diag_near_edge_us=%lu min_valid_period_us=%lu snap_to_zero_us=%lu "
+             "speed_diag_enabled pin=%d edge=falling internal_pullup=0 diag_near_edge_us=%lu min_valid_period_us=%lu snap_to_zero_us=%lu "
              "max_input_mph=%d.%d interval_ms=%lu",
              (int)APP_SPEED_PIN, (unsigned long)APP_SPEED_DIAG_DEADZONE_US, (unsigned long)MIN_VALID_PERIOD_US,
              (unsigned long)APP_SNAP_TO_ZERO_US,

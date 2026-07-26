@@ -18,7 +18,7 @@ The current firmware is intended for a small sender node: one GPIO watches the s
 - ESP32-C3 GPIO pin glitch filtering plus ISR-level impossible-period rejection.
 - Accepted-period speed calculation with rejected edges excluded from the timing baseline.
 - Snap-to-zero behavior when pulses stop.
-- OLED status display with large two-digit speed updates from boot.
+- Optional OLED status display, disabled by default.
 - Speed-output watchdog that reboots if send confirmations stop for 10 seconds.
 - Serial test mode that generates repeatable speed ramps without a connected sensor.
 - ESP-IDF 5.x and 6.x compatible ESP-NOW send callback handling.
@@ -30,14 +30,14 @@ Required hardware:
 - ESP32-C3 development board.
 - Vehicle speed sensor or compatible pulse source.
 - Signal conditioning between the vehicle signal and ESP32-C3 GPIO.
-- SSD1306-compatible 72 x 40 I2C OLED display at address `0x3C`.
+- Optional SSD1306-compatible 72 x 40 I2C OLED display at address `0x3C`.
 - ESP-NOW receiver built with an ESP8266 or ESP32.
 
 Default wiring:
 
 | Signal | ESP32-C3 pin | Notes |
 | --- | --- | --- |
-| Speed pulse input | GPIO 3 | Input with internal pull-up and falling-edge interrupt |
+| Speed pulse input | GPIO 3 | Input with external pull-up and falling-edge interrupt |
 | OLED SDA | GPIO 5 | I2C data |
 | OLED SCL | GPIO 6 | I2C clock |
 | Power | Board dependent | Use a regulated supply suitable for the ESP32-C3 board |
@@ -135,13 +135,17 @@ The ESP32-C3 pin glitch filter is enabled before the speed ISR is attached. `APP
 
 ```c
 #define APP_SAMPLE_INTERVAL_MS 100
+#define APP_SEND_INTERVAL_MS 200
 #define APP_MIN_PERIODS_PER_SPEED_SAMPLE 2
 #define APP_MAX_SPEED_SAMPLE_WINDOW_US 300000UL
+#define APP_PERIOD_CONSISTENCY_MIN_COUNT 3
+#define APP_PERIOD_CONSISTENCY_PERCENT 50
+#define APP_PERIOD_CONSISTENCY_REACQUIRE_COUNT 3
 #define APP_OUTPUT_KPH 0
 #define APP_SPEED_OUTPUT_WATCHDOG_MS 10000UL
 ```
 
-The firmware wakes every 100 ms to send output, but speed calculation uses an adaptive accepted-period window. It waits for at least `APP_MIN_PERIODS_PER_SPEED_SAMPLE` accepted periods, or consumes a partial window after `APP_MAX_SPEED_SAMPLE_WINDOW_US`. Set `APP_OUTPUT_KPH` to `1` to transmit KPH instead of MPH. `APP_SPEED_OUTPUT_WATCHDOG_MS` controls how long the current output backend can go without a successful send confirmation before the firmware restarts.
+The firmware samples speed every 100 ms and sends output every `APP_SEND_INTERVAL_MS`. Speed calculation uses an adaptive accepted-period window. It waits for at least `APP_MIN_PERIODS_PER_SPEED_SAMPLE` accepted periods, or consumes a partial window after `APP_MAX_SPEED_SAMPLE_WINDOW_US`. Once a short period baseline is established, periods outside `APP_PERIOD_CONSISTENCY_PERCENT` of that baseline are rejected before they enter the speed sample. Repeated long-period rejects reacquire after `APP_PERIOD_CONSISTENCY_REACQUIRE_COUNT` edges so sustained real slowdowns can still be followed. Set `APP_OUTPUT_KPH` to `1` to transmit KPH instead of MPH. `APP_SPEED_OUTPUT_WATCHDOG_MS` controls how long the current output backend can go without a successful send confirmation before the firmware restarts.
 
 ### Calibration
 
@@ -186,7 +190,7 @@ In test mode the firmware ignores the physical pulse input, clears accumulated p
 - 20 seconds up/down to 120 MPH
 - 15 seconds up/down to 60 MPH
 
-This is useful for validating an ESP-NOW receiver, display, or dashboard integration without spinning a sensor.
+This is useful for validating an ESP-NOW receiver or dashboard integration without spinning a sensor.
 
 ### ESP-NOW Payload
 
@@ -205,12 +209,12 @@ typedef struct __attribute__((packed))
 
 Receiver code should treat the packet as little-endian when reading `uint16_t speed` across platforms.
 
-The speed calculation code calls the `speed_output` API instead of calling ESP-NOW directly. The current backend is ESP-NOW, but the API boundary exists so a future CAN bus backend can replace the delivery path without changing pulse capture, smoothing, OLED display, BLE provisioning, or OTA code.
+The speed calculation code calls the `speed_output` API instead of calling ESP-NOW directly. The current backend is ESP-NOW, but the API boundary exists so a future CAN bus backend can replace the delivery path without changing pulse capture, smoothing, optional OLED display, BLE provisioning, or OTA code.
 
 ## Runtime Behavior
 
 - The pulse ISR and time wrapper are placed in IRAM-safe paths for reliable edge handling during flash/cache-sensitive operations.
-- The OLED displays speed from boot, defaulting to `0` until accepted pulse periods produce a measurement.
+- The OLED code is compiled out by default with `APP_ENABLE_OLED 0`.
 - The periodic sample timer notifies the main task directly, avoiding a spinlock-protected tick counter.
 - If the main task falls behind, queued sample notifications are capped at four per loop to avoid long catch-up bursts.
 - Speed output send failures are logged. In the current ESP-NOW backend, if no successful send callback is observed for 10 seconds, the firmware restarts.
