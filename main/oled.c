@@ -170,6 +170,54 @@ void oled_print(int col_px, int page, const char *text)
     }
 }
 
+static void oled_set_pixel(int x, int y)
+{
+    if (x < 0 || x >= OLED_W || y < 0 || y >= OLED_H)
+    {
+        return;
+    }
+
+    s_fb[(y / 8) * OLED_W + x] |= (uint8_t)(1U << (y % 8));
+}
+
+void oled_print_scaled(int col_px, int row_px, const char *text, int scale)
+{
+    if (!s_ready || !text || scale <= 0)
+    {
+        return;
+    }
+
+    while (*text && col_px < OLED_W)
+    {
+        uint8_t ch = (uint8_t)*text++;
+        if (ch < 32 || ch > 126)
+        {
+            ch = 32;
+        }
+
+        const uint8_t *glyph = FONT[ch - 32];
+        for (int c = 0; c < 5; c++)
+        {
+            for (int r = 0; r < 7; r++)
+            {
+                if ((glyph[c] & (1U << r)) == 0)
+                {
+                    continue;
+                }
+
+                for (int dx = 0; dx < scale; dx++)
+                {
+                    for (int dy = 0; dy < scale; dy++)
+                    {
+                        oled_set_pixel(col_px + (c * scale) + dx, row_px + (r * scale) + dy);
+                    }
+                }
+            }
+        }
+        col_px += 6 * scale;
+    }
+}
+
 void oled_flush(void)
 {
     if (!s_dev)

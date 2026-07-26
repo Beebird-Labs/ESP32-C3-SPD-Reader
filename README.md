@@ -12,13 +12,13 @@ The current firmware is intended for a small sender node: one GPIO watches the s
 
 ## Features
 
-- Interrupt-driven pulse timing on GPIO 4.
+- Interrupt-driven pulse timing on GPIO 3.
 - Replaceable speed-output backend, currently ESP-NOW broadcast or targeted peer delivery.
 - Fixed-point speed calculation and smoothing.
 - ESP32-C3 GPIO pin glitch filtering plus ISR-level impossible-period rejection.
 - Accepted-period speed calculation with rejected edges excluded from the timing baseline.
 - Snap-to-zero behavior when pulses stop.
-- OLED status display with a waiting animation and one-second speed updates.
+- OLED status display with large two-digit speed updates from boot.
 - Speed-output watchdog that reboots if send confirmations stop for 10 seconds.
 - Serial test mode that generates repeatable speed ramps without a connected sensor.
 - ESP-IDF 5.x and 6.x compatible ESP-NOW send callback handling.
@@ -37,7 +37,7 @@ Default wiring:
 
 | Signal | ESP32-C3 pin | Notes |
 | --- | --- | --- |
-| Speed pulse input | GPIO 4 | Input with internal pull-up and falling-edge interrupt |
+| Speed pulse input | GPIO 3 | Input with internal pull-up and falling-edge interrupt |
 | OLED SDA | GPIO 5 | I2C data |
 | OLED SCL | GPIO 6 | I2C clock |
 | Power | Board dependent | Use a regulated supply suitable for the ESP32-C3 board |
@@ -121,7 +121,7 @@ The current backend is ESP-NOW. The default MAC address is the ESP-NOW broadcast
 ### Speed Input
 
 ```c
-#define APP_SPEED_PIN GPIO_NUM_4
+#define APP_SPEED_PIN GPIO_NUM_3
 #define APP_SPEED_DIAG_DEADZONE_US 2000UL
 #define APP_SNAP_TO_ZERO_US 500000UL
 #define APP_MAX_INPUT_SPEED_X10 1220
@@ -135,11 +135,13 @@ The ESP32-C3 pin glitch filter is enabled before the speed ISR is attached. `APP
 
 ```c
 #define APP_SAMPLE_INTERVAL_MS 100
+#define APP_MIN_PERIODS_PER_SPEED_SAMPLE 2
+#define APP_MAX_SPEED_SAMPLE_WINDOW_US 300000UL
 #define APP_OUTPUT_KPH 0
 #define APP_SPEED_OUTPUT_WATCHDOG_MS 10000UL
 ```
 
-The firmware samples and transmits every 100 ms. Set `APP_OUTPUT_KPH` to `1` to transmit KPH instead of MPH. `APP_SPEED_OUTPUT_WATCHDOG_MS` controls how long the current output backend can go without a successful send confirmation before the firmware restarts.
+The firmware wakes every 100 ms to send output, but speed calculation uses an adaptive accepted-period window. It waits for at least `APP_MIN_PERIODS_PER_SPEED_SAMPLE` accepted periods, or consumes a partial window after `APP_MAX_SPEED_SAMPLE_WINDOW_US`. Set `APP_OUTPUT_KPH` to `1` to transmit KPH instead of MPH. `APP_SPEED_OUTPUT_WATCHDOG_MS` controls how long the current output backend can go without a successful send confirmation before the firmware restarts.
 
 ### Calibration
 
@@ -152,11 +154,11 @@ The firmware samples and transmits every 100 ms. Set `APP_OUTPUT_KPH` to `1` to 
 ### Smoothing
 
 ```c
-#define APP_FILTER_WEIGHT_NUM 4
+#define APP_FILTER_WEIGHT_NUM 6
 #define APP_FILTER_WEIGHT_DEN 10
 ```
 
-The final output uses fixed-point exponential smoothing. The default ratio, `4 / 10`, applies a 0.40 weight to the newest speed sample.
+The final output uses fixed-point exponential smoothing. The default ratio, `6 / 10`, applies a 0.60 weight to the newest speed sample.
 
 ## Protocol
 
@@ -208,7 +210,7 @@ The speed calculation code calls the `speed_output` API instead of calling ESP-N
 ## Runtime Behavior
 
 - The pulse ISR and time wrapper are placed in IRAM-safe paths for reliable edge handling during flash/cache-sensitive operations.
-- The OLED shows `Waiting` with animated dots at boot, then displays speed once pulses are observed.
+- The OLED displays speed from boot, defaulting to `0` until accepted pulse periods produce a measurement.
 - The periodic sample timer notifies the main task directly, avoiding a spinlock-protected tick counter.
 - If the main task falls behind, queued sample notifications are capped at four per loop to avoid long catch-up bursts.
 - Speed output send failures are logged. In the current ESP-NOW backend, if no successful send callback is observed for 10 seconds, the firmware restarts.
@@ -224,7 +226,7 @@ No ESP-NOW packets received:
 
 Speed reads zero:
 
-- Verify the conditioned pulse reaches GPIO 4 as a 3.3 V logic signal.
+- Verify the conditioned pulse reaches GPIO 3 as a 3.3 V logic signal.
 - Confirm the pulse edge matches the falling-edge interrupt setup.
 - Use test mode to separate sensor input issues from radio or receiver issues.
 

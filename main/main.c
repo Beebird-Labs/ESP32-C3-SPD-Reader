@@ -44,6 +44,7 @@ static const char *TAG = "SPEEDOMETER";
 
 static volatile uint32_t s_accepted_period_sum_us = 0;
 static volatile uint32_t s_accepted_period_count = 0;
+static volatile uint32_t s_accepted_window_start_us = 0;
 static volatile uint32_t s_last_accepted_pulse_us = 0;
 static volatile bool s_seen_pulse = false;
 #if APP_ENABLE_SPEED_DIAGNOSTICS
@@ -103,28 +104,9 @@ static void sample_timer_cb(void *arg)
     }
 }
 
-static void oled_print_centered(int page, const char *text)
-{
-    int px = (72 - ((int)strlen(text) * 6)) / 2;
-    oled_print(px < 0 ? 0 : px, page, text);
-}
-
-static void oled_waiting_task(void *arg)
+static void oled_speed_task(void *arg)
 {
     (void)arg;
-    static const char *dots[] = {".", "..", "..."};
-    int dot_idx = 0;
-
-    while (!s_seen_pulse)
-    {
-        oled_clear();
-        oled_print_centered(1, "Waiting");
-        oled_print_centered(2, dots[dot_idx]);
-        oled_flush();
-
-        dot_idx = (dot_idx + 1) % 3;
-        vTaskDelay(pdMS_TO_TICKS(600));
-    }
 
     while (true)
     {
@@ -133,16 +115,18 @@ static void oled_waiting_task(void *arg)
 
 #if APP_OUTPUT_KPH
         speed_x10 = (int32_t)(((uint64_t)speed_x10 * APP_KPH_PER_MPH_PPM + 500000ULL) / 1000000ULL);
-        snprintf(speed, sizeof(speed), "%ld.%ld KPH", (long)(speed_x10 / 10), (long)(speed_x10 % 10));
-#else
-        snprintf(speed, sizeof(speed), "%ld.%ld MPH", (long)(speed_x10 / 10), (long)(speed_x10 % 10));
 #endif
+        int32_t display_speed = (speed_x10 + 5) / 10;
+        if (display_speed > 99)
+        {
+            display_speed = 99;
+        }
+        snprintf(speed, sizeof(speed), "%ld", (long)display_speed);
 
         oled_clear();
-        oled_print_centered(1, "Speed");
-        oled_print_centered(2, speed);
+        oled_print_scaled((72 - ((int)strlen(speed) * 6 - 1) * 5) / 2, 2, speed, 5);
         oled_flush();
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        vTaskDelay(pdMS_TO_TICKS(200));
     }
 }
 
@@ -192,6 +176,10 @@ static void IRAM_ATTR speed_isr(void *arg)
     }
 
     s_seen_pulse = true;
+    if (s_accepted_period_count == 0)
+    {
+        s_accepted_window_start_us = s_last_accepted_pulse_us;
+    }
     s_accepted_period_sum_us += period_us;
     s_accepted_period_count++;
 #if APP_ENABLE_SPEED_DIAGNOSTICS
@@ -343,6 +331,7 @@ static void sample_and_send(void)
         portENTER_CRITICAL(&s_pulse_mux);
         s_accepted_period_sum_us = 0;
         s_accepted_period_count = 0;
+        s_accepted_window_start_us = 0;
         s_last_accepted_pulse_us = 0;
         portEXIT_CRITICAL(&s_pulse_mux);
     }
@@ -352,26 +341,36 @@ static void sample_and_send(void)
         portENTER_CRITICAL(&s_pulse_mux);
         uint32_t accepted_period_sum = s_accepted_period_sum_us;
         uint32_t accepted_period_count = s_accepted_period_count;
+        uint32_t accepted_window_start = s_accepted_window_start_us;
         uint32_t last_accepted_pulse = s_last_accepted_pulse_us;
 
-        if (accepted_period_count > 0)
+        uint32_t time_since_last = (last_accepted_pulse > 0) ? (now - last_accepted_pulse) : 0;
+        bool timed_out = time_since_last > APP_SNAP_TO_ZERO_US;
+        bool enough_periods = accepted_period_count >= APP_MIN_PERIODS_PER_SPEED_SAMPLE;
+        bool window_expired = accepted_period_count > 0 &&
+                              (now - accepted_window_start) >= APP_MAX_SPEED_SAMPLE_WINDOW_US;
+        bool consume_periods = !timed_out && (enough_periods || window_expired);
+
+        // SAFE TIMEOUT RESET: Must be inside the critical section to prevent ISR race conditions
+        if (timed_out)
         {
             s_accepted_period_sum_us = 0;
             s_accepted_period_count = 0;
-        }
-
-        uint32_t time_since_last = (last_accepted_pulse > 0) ? (now - last_accepted_pulse) : 0;
-
-        // SAFE TIMEOUT RESET: Must be inside the critical section to prevent ISR race conditions
-        if (time_since_last > APP_SNAP_TO_ZERO_US)
-        {
+            s_accepted_window_start_us = 0;
             s_last_accepted_pulse_us = 0;
+            accepted_period_count = 0;
             last_accepted_pulse = 0;
+        }
+        else if (consume_periods)
+        {
+            s_accepted_period_sum_us = 0;
+            s_accepted_period_count = 0;
+            s_accepted_window_start_us = 0;
         }
         portEXIT_CRITICAL(&s_pulse_mux);
 
         // 2. Calculate Raw Speed
-        if (accepted_period_count > 0)
+        if (consume_periods && accepted_period_count > 0)
         {
             current_speed_x10 = (int32_t)((uint64_t)accepted_period_count * K_SPEED_X10 / accepted_period_sum);
             s_last_valid_speed_x10 = current_speed_x10;
@@ -573,9 +572,9 @@ void app_main(void)
     {
         ESP_LOGW(TAG, "oled_unavailable continuing=headless");
     }
-    else if (xTaskCreate(oled_waiting_task, "oled_wait", 3072, NULL, 2, NULL) != pdPASS)
+    else if (xTaskCreate(oled_speed_task, "oled_speed", 3072, NULL, 2, NULL) != pdPASS)
     {
-        ESP_LOGW(TAG, "task_create_failed task=oled_wait continuing=headless");
+        ESP_LOGW(TAG, "task_create_failed task=oled_speed continuing=headless");
     }
 
     esp_err_t err = init_nvs();
